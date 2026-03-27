@@ -1,135 +1,96 @@
 """
-Broadcast Playlist Checker - Streamlit App
-Upload JSON + XLS + Grilla for TVD and/or CATV and get a plain-text report.
+Broadcast Playlist Checker — Streamlit App v2
 """
 import streamlit as st
 import json
 from datetime import datetime
-import os, sys
+import os, sys, io, tempfile
 sys.path.insert(0, os.path.dirname(__file__))
 from checker import (
-    parse_json_playlist, parse_xls_log, parse_grilla,
-    generate_report, check_promo_repeats, fmt_time
+    parse_json_playlist, parse_xml_log, parse_grilla,
+    generate_report, check_promo_repeats
 )
 
 st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
 st.title('📋 Broadcast Playlist Checker')
-st.caption('Upload files for TVD and/or CATV. XLS log + Grilla are optional but required for full checks.')
-
-# ── FILE UPLOADS ──────────────────────────────────────────────────────────────
+st.caption('Upload JSON + XML log + Grilla for TVD and/or CATV. XML and Grilla are optional.')
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader('🇩🇴 TVD')
-    tvd_json = st.file_uploader('Vipe JSON (TVD) — .json', type=['json'], key='tvd_json')
-    tvd_xls  = st.file_uploader('XLS Traffic Log (TVD) — CA…xml.xls or TVD…xml.xls', type=None, key='tvd_xls')
-    tvd_grid = st.file_uploader('Grilla XLSX (TVD) — GRILLA_TVD_MASTER….xlsx', type=None, key='tvd_grid')
+    tvd_json = st.file_uploader('Vipe JSON (TVD)', type=['json'], key='tvd_json')
+    tvd_xml  = st.file_uploader('Playlist XML (TVD)', type=None, key='tvd_xml')
+    tvd_grid = st.file_uploader('Grilla XLSX (TVD)', type=None, key='tvd_grid')
 
 with col2:
     st.subheader('🌎 CATV')
-    catv_json = st.file_uploader('Vipe JSON (CATV) — .json', type=['json'], key='catv_json')
-    catv_xls  = st.file_uploader('XLS Traffic Log (CATV) — CA…xml.xls or TVD…xml.xls', type=None, key='catv_xls')
-    catv_grid = st.file_uploader('Grilla XLSX (CATV) — GRILLA_CATV_MASTER….xlsx', type=None, key='catv_grid')
+    catv_json = st.file_uploader('Vipe JSON (CATV)', type=['json'], key='catv_json')
+    catv_xml  = st.file_uploader('Playlist XML (CATV)', type=None, key='catv_xml')
+    catv_grid = st.file_uploader('Grilla XLSX (CATV)', type=None, key='catv_grid')
 
+st.caption('💡 JSON only → promo repeat check. Add XML → commercial check. Add Grilla → program check.')
 st.divider()
 
-# ── PROMO-ONLY MODE ───────────────────────────────────────────────────────────
+if st.button('▶  Run Check', type='primary', use_container_width=True):
 
-st.caption('💡 If you only upload JSON files (no XLS/Grilla), the tool will run a promo repeat check only.')
-
-# ── RUN BUTTON ────────────────────────────────────────────────────────────────
-
-if st.button('▶ Run Check', type='primary', use_container_width=True):
-
-    any_file = any([tvd_json, catv_json])
-    if not any_file:
-        st.error('Upload at least one JSON file to proceed.')
+    if not tvd_json and not catv_json:
+        st.error('Upload at least one Vipe JSON to proceed.')
         st.stop()
 
-    full_report_lines = [
-        f'BROADCAST PLAYLIST CHECK REPORT',
+    report_lines = [
+        'BROADCAST PLAYLIST CHECK REPORT',
         f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-        '═' * 60,
-        ''
+        '═' * 60, ''
     ]
 
-    def process_channel(label, json_file, xls_file, grid_file):
-        lines = []
+    def process(label, json_file, xml_file, grid_file):
         if not json_file:
-            return lines
-
-        # Parse JSON
+            return []
+        lines = []
         try:
             data = json.load(json_file)
             playlist = parse_json_playlist(data)
         except Exception as e:
-            lines.append(f'ERROR parsing JSON for {label}: {e}')
-            return lines
+            return [f'ERROR parsing JSON for {label}: {e}']
 
-        # Parse XLS
-        xls_rows = []
-        if xls_file:
+        xml_rows = []
+        if xml_file:
             try:
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.xls') as tmp:
-                    tmp.write(xls_file.read())
-                    tmp_path = tmp.name
-                xls_rows = parse_xls_log(tmp_path)
-                os.unlink(tmp_path)
+                xml_rows = parse_xml_log(xml_file.read())
             except Exception as e:
-                lines.append(f'  WARNING: Could not parse XLS log: {e}')
+                lines.append(f'  WARNING: Could not parse XML log: {e}')
 
-        # Parse Grilla
         grilla_ids = []
         if grid_file and playlist['date']:
             try:
-                import tempfile
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
-                    tmp.write(grid_file.read())
-                    tmp_path = tmp.name
-                grilla_ids = parse_grilla(tmp_path, playlist['date'])
-                os.unlink(tmp_path)
+                grilla_ids = parse_grilla(grid_file, playlist['date'])
             except Exception as e:
                 lines.append(f'  WARNING: Could not parse Grilla: {e}')
 
         # Promo-only mode
-        if not xls_rows and not grilla_ids:
+        if not xml_rows and not grilla_ids:
             promo_issues = check_promo_repeats(playlist)
             lines.append('═' * 60)
             lines.append(f'CHANNEL: {label.upper()} — PROMO REPEAT CHECK ONLY')
-            lines.append(f'DATE: {playlist["date"]} | TYPE: {"FULL DAY" if playlist["type"] == "full" else "CURRENT"}')
+            lines.append(f'DATE: {playlist["date"]} | TYPE: {"FULL DAY" if playlist["type"]=="full" else "CURRENT"}')
             lines.append('═' * 60)
-            if not promo_issues:
-                lines.append('  ✓ No repeated promos within any break')
-            else:
-                for issue in promo_issues:
-                    lines.append(issue)
+            lines += promo_issues if promo_issues else ['  ✓ No repeated promos within any break']
             lines.append('')
             return lines
 
-        # Full check
-        report = generate_report(label, playlist, xls_rows, grilla_ids)
-        lines.append(report)
+        lines.append(generate_report(label, playlist, xml_rows, grilla_ids))
         return lines
 
     with st.spinner('Running checks...'):
-        tvd_lines  = process_channel('TVD',  tvd_json,  tvd_xls,  tvd_grid)
-        catv_lines = process_channel('CATV', catv_json, catv_xls, catv_grid)
+        report_lines += process('TVD',  tvd_json,  tvd_xml,  tvd_grid)
+        report_lines += process('CATV', catv_json, catv_xml, catv_grid)
 
-    full_report_lines.extend(tvd_lines)
-    full_report_lines.extend(catv_lines)
-
-    report_text = '\n'.join(full_report_lines)
-
+    report_text = '\n'.join(report_lines)
     st.subheader('📄 Report')
     st.text(report_text)
-
     st.download_button(
-        label='⬇ Download Report (.txt)',
-        data=report_text,
+        '⬇ Download Report (.txt)', report_text,
         file_name=f'broadcast_check_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
-        mime='text/plain',
-        use_container_width=True
+        mime='text/plain', use_container_width=True
     )
-
