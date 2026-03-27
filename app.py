@@ -22,15 +22,15 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader('🇩🇴 TVD')
-    tvd_json = st.file_uploader('Vipe JSON (TVD)', type=['json'], key='tvd_json')
-    tvd_xls  = st.file_uploader('XLS Traffic Log (TVD)', type=['xls'], key='tvd_xls')
-    tvd_grid = st.file_uploader('Grilla XLSX (TVD)', type=['xlsx'], key='tvd_grid')
+    tvd_json = st.file_uploader('Vipe JSON (TVD) — .json', type=['json'], key='tvd_json')
+    tvd_xls  = st.file_uploader('XLS Traffic Log (TVD) — CA…xml.xls or TVD…xml.xls', type=None, key='tvd_xls')
+    tvd_grid = st.file_uploader('Grilla XLSX (TVD) — GRILLA_TVD_MASTER….xlsx', type=None, key='tvd_grid')
 
 with col2:
     st.subheader('🌎 CATV')
-    catv_json = st.file_uploader('Vipe JSON (CATV)', type=['json'], key='catv_json')
-    catv_xls  = st.file_uploader('XLS Traffic Log (CATV)', type=['xls'], key='catv_xls')
-    catv_grid = st.file_uploader('Grilla XLSX (CATV)', type=['xlsx'], key='catv_grid')
+    catv_json = st.file_uploader('Vipe JSON (CATV) — .json', type=['json'], key='catv_json')
+    catv_xls  = st.file_uploader('XLS Traffic Log (CATV) — CA…xml.xls or TVD…xml.xls', type=None, key='catv_xls')
+    catv_grid = st.file_uploader('Grilla XLSX (CATV) — GRILLA_CATV_MASTER….xlsx', type=None, key='catv_grid')
 
 st.divider()
 
