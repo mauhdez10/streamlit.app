@@ -56,10 +56,29 @@ if uploaded:
             rows.append({'Date': date_str, 'Channel': ch,
                          'Type': f'Playlist {short_date}', 'File': jf.name})
         if info['xml']:
-            rows.append({'Date': date_str, 'Channel': ch, 'Type': 'Log', 'File': info['xml'].name})
+            rows.append({'Date': date_str, 'Channel': ch,
+                         'Type': f'Log {short_date}', 'File': info['xml'].name})
+
+    # For grillas, read the week-start Monday date from the file content
     for ch_key, gf in grillas.items():
         ch = 'CATV 🌎' if ch_key == 'catv' else 'TVD 📺'
-        rows.append({'Date': '(Week)', 'Channel': ch, 'Type': 'Grilla', 'File': gf.name})
+        grilla_date_str = '(Week)'
+        try:
+            from openpyxl import load_workbook
+            import io
+            gf.seek(0)
+            wb = load_workbook(io.BytesIO(gf.read()), read_only=True)
+            gf.seek(0)
+            ws = wb.active
+            rows_g = list(ws.iter_rows(max_row=3, values_only=True))
+            if len(rows_g) > 1:
+                monday_val = rows_g[1][2] if len(rows_g[1]) > 2 else None
+                if monday_val and hasattr(monday_val, 'strftime'):
+                    grilla_date_str = monday_val.strftime('%m/%d')
+        except: pass
+        grilla_label = f'{"Grilla" if lang=="es" else "Grid"} {grilla_date_str}'
+        rows.append({'Date': grilla_date_str, 'Channel': ch,
+                     'Type': grilla_label, 'File': gf.name})
     for uf in unknown_files:
         rows.append({'Date': '?', 'Channel': '?', 'Type': '?', 'File': uf.name})
     if rows:
