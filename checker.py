@@ -456,13 +456,40 @@ def check_commercials_vs_xml(playlist, xml_rows, current_start, lang):
     pl_set  = Counter(c['asset_ref'] for c in pl_comms)
     xml_set = Counter(r['mediaid'] for r in xml_commercials(xml_rows_use))
 
+    # Build break-location index: ref -> list of (after_program, start_time)
+    break_index = defaultdict(list)
+    for brk in playlist['breaks']:
+        after = brk.get('after_program', '?')
+        for item in brk['items']:
+            if item['type'] == 'Commercial':
+                break_index[item['ref']].append((after, item.get('start')))
+
+    added_lbl   = {'en': 'added to playlist',   'es': 'agregado a playlist'}
+    removed_lbl = {'en': 'removed from playlist','es': 'eliminado de playlist'}
+    location_lbl= {'en': 'Location',             'es': 'Ubicación'}
+
     diffs = []
     for ref in sorted(set(pl_set) | set(xml_set)):
-        pc, xc = pl_set.get(ref,0), xml_set.get(ref,0)
-        if pc != xc:
-            if pc == 0: diffs.append(T('xml_not_pl', lang, ref=ref, n=xc))
-            elif xc == 0: diffs.append(T('pl_not_xml', lang, ref=ref, n=pc))
-            else: diffs.append(T('count_diff', lang, ref=ref, xn=xc, pn=pc))
+        pc, xc = pl_set.get(ref, 0), xml_set.get(ref, 0)
+        if pc == xc:
+            continue
+        diff = pc - xc  # positive = extra in playlist, negative = missing from playlist
+
+        if pc == 0:
+            diffs.append(T('xml_not_pl', lang, ref=ref, n=xc))
+        elif xc == 0:
+            diffs.append(T('pl_not_xml', lang, ref=ref, n=pc))
+        else:
+            direction = f'+{diff} {added_lbl[lang]}' if diff > 0 else f'{diff} {removed_lbl[lang]}'
+            diffs.append(T('count_diff', lang, ref=ref, xn=xc, pn=pc) + f'  ({direction})')
+
+            # Show break locations for extras in playlist
+            if diff > 0 and ref in break_index:
+                locations = break_index[ref]
+                # The last `diff` occurrences are the ones added (assume appended)
+                extras = locations[-diff:] if len(locations) >= diff else locations
+                for after, st in extras:
+                    diffs.append(f'       → {location_lbl[lang]}: after [{after}] @ {fmt_t(st)}')
 
     if not diffs:
         return [f'  {T("ok_commercials", lang, n=len(pl_comms))}']
