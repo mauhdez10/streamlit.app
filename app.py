@@ -174,8 +174,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
 
     # Display manual check warnings in red
     if all_manual_warns:
-        st.error('
-'.join(all_manual_warns))
+        st.error('\n'.join(all_manual_warns))
 
     if len(sorted_dates) > 1:
         tab_labels = [t('tab_all')] + [f'📅 {d}' for d in sorted_dates]
