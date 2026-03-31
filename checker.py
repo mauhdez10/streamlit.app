@@ -234,6 +234,35 @@ def parse_xml_log(filepath_or_bytes):
                 for i in traffic.findall('item')]
     except: return []
 
+def parse_xml_log_tn(filepath_or_bytes):
+    """
+    Parser for Todonovelas XML — <tabledata><data><row><column-N> format.
+    column-1=LocalTime, column-4=MediaId, column-5=Type, column-6=Title
+    Returns same dict format as parse_xml_log for compatibility.
+    """
+    try:
+        if hasattr(filepath_or_bytes, 'read'): content = filepath_or_bytes.read()
+        elif isinstance(filepath_or_bytes, bytes): content = filepath_or_bytes
+        else:
+            with open(filepath_or_bytes, 'rb') as f: content = f.read()
+        root = ET.fromstring(content)
+        items = []
+        for row in root.findall('.//row'):
+            local_time = row.findtext('column-1', '').strip()
+            mediaid    = row.findtext('column-4', '').strip()
+            typ        = row.findtext('column-5', '').strip().upper()
+            title      = row.findtext('column-6', '').strip()
+            duration   = row.findtext('column-3', '').strip()
+            # Normalise type to match standard contenttype values
+            if typ == 'PROGRAM': ct = 'PROGRAM_BEGIN'
+            elif typ == 'PROMOTION': ct = 'PROMO'
+            else: ct = typ
+            items.append({'mediaid': mediaid, 'name': title,
+                          'contenttype': ct, 'startat': local_time,
+                          'duration': duration, 'externalid': ''})
+        return items
+    except: return []
+
 def _xml_dur_secs(dur_str):
     """Parse XML duration HH:MM:SS:FF → seconds (ignore frames)."""
     try:
@@ -296,6 +325,8 @@ def parse_grilla(filepath_or_bytes, target_date, channel='catv'):
     """Route to the correct grilla parser based on channel type."""
     if channel in ('latam', 'us'):
         return _parse_grilla_pasiones(filepath_or_bytes, target_date)
+    if channel == 'tn':
+        return _parse_grilla_tn(filepath_or_bytes, target_date)
     return _parse_grilla_catv_tvd(filepath_or_bytes, target_date)
 
 def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
@@ -408,16 +439,80 @@ def _parse_grilla_pasiones(filepath_or_bytes, target_date):
     if target_ws is None or target_col is None:
         return []
 
-    # Episode IDs are in the non-time, non-None cells in the target column
-    # Alternating pattern: show title row, episode ID row
+    # Episode ID rows have ET column (col 1) = None, show name rows have a time value.
+    # This reliably catches IDs with any digit count (LATUV49, UMM14, etc.)
+    ET_COL = 1
     episode_ids = []
     for row in all_rows[2:]:
+        et_val = row[ET_COL] if ET_COL < len(row) else 'x'
+        if et_val is not None:
+            continue  # show name row — skip
         val = row[target_col] if target_col < len(row) else None
         if val and isinstance(val, str):
             val = val.strip()
-            if is_episode_id(val):
+            if val:
                 episode_ids.append(normalize_id(val))
     return episode_ids
+
+def _parse_grilla_tn(filepath_or_bytes, target_date):
+    """
+    Todonovelas grilla — multi-tab, same header format as Pasiones.
+    Returns list of (show_name, episode_num) tuples for program matching.
+    Episode numbers are integers in the grid (55, 121...).
+    Show name rows: ET column has value. Episode rows: ET column is None.
+    """
+    from openpyxl import load_workbook
+    import io
+    if isinstance(filepath_or_bytes, str):
+        wb = load_workbook(filepath_or_bytes, read_only=True)
+    else:
+        raw = filepath_or_bytes.read() if hasattr(filepath_or_bytes, 'read') else filepath_or_bytes
+        wb = load_workbook(io.BytesIO(raw), read_only=True)
+
+    target_ws = None
+    target_col = None
+    all_rows = []
+
+    for name in reversed(wb.sheetnames):
+        ws = wb[name]
+        rows = list(ws.iter_rows(max_row=3, values_only=True))
+        if len(rows) < 2: continue
+        header = rows[1]
+        col_dates = [(i, _parse_date_str(cell, force_year=target_date.year))
+                     for i, cell in enumerate(header)
+                     if _parse_date_str(cell, force_year=target_date.year)]
+        if not col_dates: continue
+        if col_dates[0][1] <= target_date <= col_dates[-1][1]:
+            for col_i, d in col_dates:
+                if d == target_date:
+                    target_col = col_i
+                    target_ws  = ws
+                    all_rows   = list(ws.iter_rows(values_only=True))
+                    break
+            break
+
+    if not all_rows or target_col is None:
+        return []
+
+    ET_COL = 1
+    result = []
+    current_show = None
+    for row in all_rows[2:]:
+        et_val = row[ET_COL] if ET_COL < len(row) else 'x'
+        val    = row[target_col] if target_col < len(row) else None
+        if val is None: continue
+        if et_val is not None:
+            # Show name row
+            current_show = str(val).strip() if val else None
+        else:
+            # Episode number row — val is an integer
+            if current_show and val is not None:
+                try:
+                    ep_num = int(val)
+                    result.append((current_show, ep_num))
+                except (ValueError, TypeError):
+                    pass
+    return result
 
 
 # ── FILE DETECTION ────────────────────────────────────────────────────────────
@@ -451,10 +546,19 @@ def _date_from_json_content(f):
     return None
 
 def _date_from_xml_filename(name):
-    """XML filenames are always MMDDYYYY: TVD03302026.xml, CA03302026.xml."""
+    """XML filenames date extraction.
+    Standard: MMDDYYYY (TVD03302026.xml, CA03302026.xml, PL03312026.xml)
+    TN:       MMDDYY   (TN_033126_TUESDAY.xml)
+    """
+    # Try MMDDYYYY first (8 digits)
     m = re.search(r'(\d{2})(\d{2})(\d{4})', name)
     if m:
         try: return datetime(int(m.group(3)), int(m.group(1)), int(m.group(2))).date()
+        except: pass
+    # Try MMDDYY (6 digits, 2-digit year)
+    m = re.search(r'(\d{2})(\d{2})(\d{2})(?!\d)', name)
+    if m:
+        try: return datetime(2000 + int(m.group(3)), int(m.group(1)), int(m.group(2))).date()
         except: pass
     return None
 
@@ -485,12 +589,14 @@ def detect_files(uploaded_files):
             elif name_up.startswith('TVD'): channel = 'tvd'
             elif name_up.startswith('PL'):  channel = 'latam'
             elif name_up.startswith('PUS'): channel = 'us'
+            elif name_up.startswith('TN'):  channel = 'tn'
             else: unknown.append(f); continue
         else:
-            if 'CATV' in name_up:            channel = 'catv'
-            elif 'TVD' in name_up:           channel = 'tvd'
+            if 'CATV' in name_up:                       channel = 'catv'
+            elif 'TVD' in name_up:                      channel = 'tvd'
             elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up: channel = 'latam'
             elif 'PASIONES_US' in name_up or 'PASIONES US' in name_up:       channel = 'us'
+            elif 'FAST_TODONOVELAS' in name_up or 'FAST TODONOVELAS' in name_up or 'TODO_NOVELAS' in name_up: channel = 'tn'
             else: unknown.append(f); continue
 
         if ftype == 'grilla':
@@ -849,7 +955,54 @@ def check_cue_tones(playlist, lang='en'):
 
 # ── REPORT ────────────────────────────────────────────────────────────────────
 
-def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en'):
+def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
+    """
+    TN program check: grilla has (show_name, ep_num) pairs (including re-airs).
+    JSON names are like LA_HOGUERA_AMBICION_E055 — parse episode number.
+    Deduplicate both sides by episode number and compare as sets.
+    """
+    import re as _re
+
+    def parse_ep_num(name):
+        m = _re.search(r'_E(\d+)$', str(name))
+        return int(m.group(1)) if m else None
+
+    # Unique episode numbers from grilla (deduplicated)
+    grilla_eps = {}  # ep_num -> show_name (first occurrence)
+    for show_name, ep_num in grilla_pairs:
+        if ep_num not in grilla_eps:
+            grilla_eps[ep_num] = show_name
+
+    # Unique episodes from JSON
+    seen, json_eps = set(), {}
+    for p in playlist['programs']:
+        ref = p['episode_id_raw']
+        if ref in seen: continue
+        seen.add(ref)
+        if current_start and p['start'] and p['start'] < current_start: continue
+        ep_num = parse_ep_num(p['name'])
+        if ep_num is not None:
+            json_eps[ep_num] = {'name': p['name'], 'start': p['start']}
+
+    issues = []
+    # In grilla but not in JSON
+    for ep, show in sorted(grilla_eps.items()):
+        if ep not in json_eps:
+            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}')
+
+    # In JSON but not in grilla
+    for ep, info in sorted(json_eps.items()):
+        if ep not in grilla_eps:
+            issues.append(
+                f'  ✗  EXTRA IN PLAYLIST: {info["name"]} @ {fmt_t(info["start"])} (not in grilla)'
+            )
+
+    if not issues:
+        issues.append(f'  ✓ All {len(json_eps)} episodes match grilla')
+    return issues
+
+
+def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False):
     sep = '═' * 60
     pt  = playlist['type']
     current_start = playlist['programs'][0]['start'] if pt == 'current' and playlist['programs'] else None
@@ -866,8 +1019,12 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en'):
     lines += [sep, f'{T("summary",lang)}: {len(part_seq)} {T("show_blocks",lang)} | {total_comms} {T("commercials_lbl",lang)}', '']
 
     lines.append(f'── [1] {T("section_programs",lang)} ──')
-    lines += ([T('no_grilla', lang)] if not grilla_ids else
-              check_programs_vs_grilla(playlist, grilla_ids, current_start, lang))
+    if is_tn and grilla_ids:
+        lines += check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
+    elif not grilla_ids:
+        lines.append(T('no_grilla', lang))
+    else:
+        lines += check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
     lines.append('')
 
     lines.append(f'── [2] {T("section_commercials",lang)} ──')
@@ -889,9 +1046,10 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en'):
     lines += ni if ni else [f'  {T("ok_ingested",lang)}']
     lines.append('')
 
-    lines.append(f'── [5] {T("section_bugs",lang)} ──')
-    lines += check_bugs(playlist, current_start, lang)
-    lines.append('')
+    if not is_tn:
+        lines.append(f'── [5] {T("section_bugs",lang)} ──')
+        lines += check_bugs(playlist, current_start, lang)
+        lines.append('')
 
     if pt == 'full':
         lines.append(f'── [6] {T("section_cues",lang)} ──')

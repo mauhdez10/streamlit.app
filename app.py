@@ -7,7 +7,7 @@ from datetime import datetime
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
 from checker import (
-    parse_json_playlist, parse_xml_log, parse_grilla,
+    parse_json_playlist, parse_xml_log, parse_xml_log_tn, parse_grilla,
     generate_report, check_promo_repeats, detect_files
 )
 
@@ -94,7 +94,7 @@ available = sorted(set(ch for (_, ch) in days.keys()) | set(grillas.keys()))
 if available:
     selected = st.multiselect(
         t('channels'), options=available, default=available,
-        format_func=lambda x: {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐'}.get(x,x)
+        format_func=lambda x: {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}.get(x,x)
     )
 else:
     selected = []
@@ -106,10 +106,12 @@ if st.button(t('run'), type='primary', use_container_width=True):
 
     CH_LABELS = {
         'catv': 'CATV', 'tvd': 'TVD',
-        'latam': 'Pasiones Latam', 'us': 'Pasiones US'
+        'latam': 'Pasiones Latam', 'us': 'Pasiones US',
+        'tn': 'Fast Todonovelas'
     }
 
     def process_one(channel, json_file, xml_file, grilla_file):
+        is_tn = (channel == 'tn')
         lines = []
         try:
             json_file.seek(0)
@@ -119,7 +121,9 @@ if st.button(t('run'), type='primary', use_container_width=True):
             return [f'ERROR parsing JSON: {e}'], []
         xml_rows = []
         if xml_file:
-            try: xml_file.seek(0); xml_rows = parse_xml_log(xml_file)
+            try:
+                xml_file.seek(0)
+                xml_rows = parse_xml_log_tn(xml_file) if is_tn else parse_xml_log(xml_file)
             except Exception as e: lines.append(f'  WARNING: XML error: {e}')
         grilla_ids = []
         if grilla_file and playlist['date']:
@@ -137,7 +141,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
             lines.append('')
             return lines, []
         ch_label = CH_LABELS.get(channel, channel.upper())
-        report_text, manual_warns = generate_report(ch_label, playlist, xml_rows, grilla_ids, lang)
+        report_text, manual_warns = generate_report(ch_label, playlist, xml_rows, grilla_ids, lang, is_tn=is_tn)
         lines.append(report_text)
         return lines, manual_warns
 
@@ -150,13 +154,13 @@ if st.button(t('run'), type='primary', use_container_width=True):
         '═'*60, ''
     ]
 
-    all_manual_warns = []
-    CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐'}
+    all_manual_warns = []  # list of (channel_label, date_str, count)
+    CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}
     with st.spinner(t('running')):
         for date_str in sorted_dates:
             d_lines = [f'{"DATE" if lang=="en" else "FECHA"}: {date_str}', '─'*60]
             ch_reports = {}  # channel -> lines
-            for channel in ['catv', 'tvd', 'latam', 'us']:
+            for channel in ['catv', 'tvd', 'latam', 'us', 'tn']:
                 if channel not in selected: continue
                 key = (date_str, channel)
                 if key not in days: continue
@@ -172,7 +176,10 @@ if st.button(t('run'), type='primary', use_container_width=True):
                     result = process_one(channel, jf, xml_file, grilla_f)
                     plines, warns = result if isinstance(result, tuple) else (result, [])
                     ch_lines += plines
-                    all_manual_warns.extend(warns)
+                    if warns:
+                        all_manual_warns.append(
+                            (CH_DISPLAY.get(channel, channel.upper()), date_str, len(warns))
+                        )
                 ch_reports[channel] = ch_lines
                 d_lines += ch_lines
             d_lines.append('')
@@ -186,7 +193,10 @@ if st.button(t('run'), type='primary', use_container_width=True):
     full_text = '\n'.join(all_lines)
 
     if all_manual_warns:
-        st.error('\n'.join(all_manual_warns))
+        warn_lines = ['⚠ MANUAL REVIEW NEEDED:' if lang == 'en' else '⚠ REVISIÓN MANUAL REQUERIDA:']
+        for ch_lbl, d_str, cnt in all_manual_warns:
+            warn_lines.append(f'  {ch_lbl} — {d_str}: {cnt} block{"s" if cnt>1 else ""} need manual review')
+        st.error('\n'.join(warn_lines))
 
     if len(sorted_dates) > 1:
         tab_labels = [t('tab_all')] + [f'📅 {d}' for d in sorted_dates]
