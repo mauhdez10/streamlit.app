@@ -127,10 +127,11 @@ if st.button(t('run'), type='primary', use_container_width=True):
                       '═'*60]
             lines += pi if pi else ['  ✓ No repeated promos']
             lines.append('')
-            return lines
-        lines.append(generate_report('CATV' if channel=='catv' else 'TVD',
-                                     playlist, xml_rows, grilla_ids, lang))
-        return lines
+            return lines, []
+        report_text, manual_warns = generate_report('CATV' if channel=='catv' else 'TVD',
+                                                     playlist, xml_rows, grilla_ids, lang)
+        lines.append(report_text)
+        return lines, manual_warns
 
     # Build per-day reports
     sorted_dates = sorted(set(d for (d, _) in days.keys()))
@@ -141,6 +142,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
         '═'*60, ''
     ]
 
+    all_manual_warns = []
     with st.spinner(t('running')):
         for date_str in sorted_dates:
             d_lines = [f'{"DATE" if lang=="en" else "FECHA"}: {date_str}', '─'*60]
@@ -156,7 +158,10 @@ if st.button(t('run'), type='primary', use_container_width=True):
                     d_lines.append(f'JSON: {jf.name}')
                     if xml_file:  xml_file.seek(0)
                     if grilla_f:  grilla_f.seek(0)
-                    d_lines += process_one(channel, jf, xml_file, grilla_f)
+                    result = process_one(channel, jf, xml_file, grilla_f)
+                    plines, warns = result if isinstance(result, tuple) else (result, [])
+                    d_lines += plines
+                    all_manual_warns.extend(warns)
             d_lines.append('')
             day_reports[date_str] = d_lines
 
@@ -166,6 +171,11 @@ if st.button(t('run'), type='primary', use_container_width=True):
     for d in sorted_dates:
         all_lines += day_reports.get(d, [])
     full_text = '\n'.join(all_lines)
+
+    # Display manual check warnings in red
+    if all_manual_warns:
+        st.error('
+'.join(all_manual_warns))
 
     if len(sorted_dates) > 1:
         tab_labels = [t('tab_all')] + [f'📅 {d}' for d in sorted_dates]

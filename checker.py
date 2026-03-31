@@ -142,7 +142,7 @@ def parse_json_playlist(data):
         if dt: date = dt.date(); break
 
     programs, commercials, promos, cue_tones, not_ingested, breaks = [], [], [], [], [], []
-    current_break, last_program = [], None
+    current_break, last_program, last_program_raw = [], None, None
 
     for ev in events:
         ev_assets = ev.get('assets', [])
@@ -168,7 +168,9 @@ def parse_json_playlist(data):
 
             if atype in ('Program', 'live'):
                 if current_break:
-                    breaks.append({'after_program': last_program, 'items': current_break[:]})
+                    breaks.append({'after_program': last_program,
+                                   'after_program_raw': last_program_raw,
+                                   'items': current_break[:]})
                     current_break = []
                 seg_m = re.search(r'_(\d+)$', aref)
                 seg   = int(seg_m.group(1)) if seg_m else 1
@@ -177,7 +179,8 @@ def parse_json_playlist(data):
                                   'seg_num': seg, 'start': ev_start, 'duration': ev_dur,
                                   'name': ev_name, 'ref': ev_ref, 'asset_type': atype,
                                   'is_missing': (atype == 'Program' and tcin.startswith('07:'))})
-                last_program = ep_id
+                last_program     = ep_id
+                last_program_raw = aref
 
             elif atype == 'Commercial':
                 commercials.append({'asset_ref': aref, 'name': ev_name,
@@ -190,7 +193,9 @@ def parse_json_playlist(data):
                 current_break.append({'type': 'Promotion', 'ref': aref, 'start': ev_start})
 
     if current_break:
-        breaks.append({'after_program': last_program, 'items': current_break})
+        breaks.append({'after_program': last_program,
+                       'after_program_raw': last_program_raw,
+                       'items': current_break})
 
     return {'type': playlist_type, 'date': date, 'events': events,
             'programs': programs, 'commercials': commercials, 'promos': promos,
@@ -222,9 +227,50 @@ def parse_xml_log(filepath_or_bytes):
         return [{'mediaid': i.get('mediaid',''), 'name': i.findtext('n','').strip(),
                  'contenttype': i.findtext('contenttype','').strip().upper(),
                  'startat': i.findtext('startat','').strip(),
+                 'duration': i.findtext('duration','').strip(),
                  'externalid': i.findtext('externalid','').strip()}
                 for i in traffic.findall('item')]
     except: return []
+
+def _xml_dur_secs(dur_str):
+    """Parse XML duration HH:MM:SS:FF → seconds (ignore frames)."""
+    try:
+        p = dur_str.split(':')
+        return int(p[0])*3600 + int(p[1])*60 + int(p[2])
+    except: return 0
+
+def _is_xml_program_anchor(item):
+    """Only PROGRAM_BEGIN/PROGRAM_SEGMENT used for break-by-break alignment."""
+    return item.get('contenttype','') in ('PROGRAM_BEGIN','PROGRAM_SEGMENT')
+
+def _is_xml_start_anchor(item):
+    """For partial start detection: program segments + infomercials (CM ≥ 20min)."""
+    ct = item.get('contenttype','')
+    if ct in ('PROGRAM_BEGIN','PROGRAM_SEGMENT'): return True
+    if ct == 'COMMERCIAL' and _xml_dur_secs(item.get('duration','')) >= 1200: return True
+    return False
+
+def build_xml_breaks(xml_rows):
+    """
+    Walk XML, group commercials between PROGRAM segments only (not infomercials).
+    Infomercials appear as commercials inside a break, matching JSON behavior.
+    Returns list of {'anchor_id', 'commercials': [mediaid, ...]}
+    Includes breaks with zero commercials for alignment.
+    """
+    result = []
+    anchor = None
+    comms  = []
+    for item in xml_rows:
+        if _is_xml_program_anchor(item):
+            if anchor is not None:
+                result.append({'anchor_id': anchor, 'commercials': comms[:]})
+            anchor = item['mediaid']
+            comms  = []
+        elif item.get('contenttype') == 'COMMERCIAL':
+            comms.append(item['mediaid'])
+    if anchor is not None:
+        result.append({'anchor_id': anchor, 'commercials': comms[:]})
+    return result
 
 def xml_commercials(rows):
     return [r for r in rows if r.get('contenttype') == 'COMMERCIAL']
@@ -445,55 +491,177 @@ def check_programs_vs_grilla(playlist, grilla_ids, current_start, lang):
 
 
 def check_commercials_vs_xml(playlist, xml_rows, current_start, lang):
-    # Partial: anchor XML via externalid of first JSON event; use ALL playlist commercials
-    # Full: compare everything
+    """
+    Break-by-break commercial comparison.
+    Aligns XML and JSON by segment ID (after_program_raw).
+    Handles show replacements with a look-ahead window.
+    Returns (issues_list, manual_warnings_list).
+    """
+    WINDOW = 15  # max segments to look ahead for replacement recovery
+
+    # --- Build XML break list ---
+    xml_breaks = build_xml_breaks(xml_rows)
+
+    # --- Build JSON break list (only those with a raw anchor) ---
+    json_breaks = [b for b in playlist['breaks'] if b.get('after_program_raw')]
+
+    # --- For partial: find starting position using externalid anchor ---
     if current_start:
-        anchor = find_xml_anchor_by_extid(playlist['events'], xml_rows)
-        xml_rows_use = xml_rows[anchor:]
-    else:
-        xml_rows_use = xml_rows
-    pl_comms = playlist['commercials']  # all in JSON (partial or full)
-    pl_set  = Counter(c['asset_ref'] for c in pl_comms)
-    xml_set = Counter(r['mediaid'] for r in xml_commercials(xml_rows_use))
+        anchor_row_idx = find_xml_anchor_by_extid(playlist['events'], xml_rows)
+        anchor_mediaid = xml_rows[anchor_row_idx]['mediaid'] if anchor_row_idx < len(xml_rows) else None
 
-    # Build break-location index: ref -> list of (after_program, start_time)
-    break_index = defaultdict(list)
-    for brk in playlist['breaks']:
-        after = brk.get('after_program', '?')
-        for item in brk['items']:
-            if item['type'] == 'Commercial':
-                break_index[item['ref']].append((after, item.get('start')))
+        if anchor_mediaid:
+            # Skip XML breaks up to and including the anchor segment
+            xi_start = next((i+1 for i, xb in enumerate(xml_breaks)
+                             if xb['anchor_id'] == anchor_mediaid), 0)
+            xml_breaks = xml_breaks[xi_start:]
+            # Skip JSON breaks up to and including the anchor segment
+            ji_start = next((i+1 for i, jb in enumerate(json_breaks)
+                             if jb.get('after_program_raw') == anchor_mediaid), 0)
+            json_breaks = json_breaks[ji_start:]
 
-    added_lbl   = {'en': 'added to playlist',   'es': 'agregado a playlist'}
-    removed_lbl = {'en': 'removed from playlist','es': 'eliminado de playlist'}
-    location_lbl= {'en': 'Location',             'es': 'Ubicación'}
+    # --- Labels ---
+    added_lbl    = {'en': 'added to playlist',    'es': 'agregado a playlist'}
+    removed_lbl  = {'en': 'removed from playlist', 'es': 'eliminado de playlist'}
+    replaced_lbl = {'en': 'SHOW REPLACED',         'es': 'PROGRAMA REEMPLAZADO'}
+    lost_lbl     = {'en': 'ALIGNMENT LOST',        'es': 'ALINEACIÓN PERDIDA'}
+    summary_lbl  = {'en': 'COMMERCIAL CHANGES SUMMARY', 'es': 'RESUMEN DE CAMBIOS'}
+    added_tot    = {'en': 'added',    'es': 'agregados'}
+    removed_tot  = {'en': 'removed',  'es': 'eliminados'}
+    manual_cap   = {'en': '!!! DOUBLE CHECK MANUALLY !!!', 'es': '!!! VERIFICAR MANUALMENTE !!!'}
 
-    diffs = []
-    for ref in sorted(set(pl_set) | set(xml_set)):
-        pc, xc = pl_set.get(ref, 0), xml_set.get(ref, 0)
-        if pc == xc:
-            continue
-        diff = pc - xc  # positive = extra in playlist, negative = missing from playlist
+    issues       = []
+    all_added    = Counter()
+    all_removed  = Counter()
+    manual_warns = []
 
-        if pc == 0:
-            diffs.append(T('xml_not_pl', lang, ref=ref, n=xc))
-        elif xc == 0:
-            diffs.append(T('pl_not_xml', lang, ref=ref, n=pc))
+    def _break_start(jb):
+        return next((i['start'] for i in jb['items'] if i.get('start')), None)
+
+    def _compare_pair(xb, jb):
+        """Compare one aligned XML/JSON break pair. Returns (lines, added, removed)."""
+        xml_c  = Counter(xb['commercials'])
+        json_c = Counter(i['ref'] for i in jb['items'] if i['type'] == 'Commercial')
+        anchor = jb.get('after_program_raw', '?')
+        bs     = _break_start(jb)
+
+        lines, add, rem = [], Counter(), Counter()
+        for ref in sorted(set(xml_c) | set(json_c)):
+            xc, jc = xml_c.get(ref, 0), json_c.get(ref, 0)
+            if xc == jc: continue
+            diff = jc - xc
+            if diff > 0:
+                lines.append(f'     + {ref} x{diff}  ({added_lbl[lang]})')
+                add[ref] += diff
+            else:
+                lines.append(f'     - {ref} x{abs(diff)}  ({removed_lbl[lang]})')
+                rem[ref] += abs(diff)
+
+        if lines:
+            header = [f'  ⚠  Break after [{anchor}] @ {fmt_t(bs)}']
+            return header + lines, add, rem
+        return [], add, rem
+
+    def _compare_pool(xml_blist, json_blist, xml_label, json_label, bs):
+        """Compare pooled commercials from a replaced block."""
+        xml_c  = Counter(ref for xb in xml_blist for ref in xb['commercials'])
+        json_c = Counter(ref for jb in json_blist for i in jb['items']
+                         if i['type'] == 'Commercial' for ref in [i['ref']])
+        lines, add, rem = [], Counter(), Counter()
+        for ref in sorted(set(xml_c) | set(json_c)):
+            xc, jc = xml_c.get(ref, 0), json_c.get(ref, 0)
+            if xc == jc: continue
+            diff = jc - xc
+            if diff > 0: lines.append(f'     + {ref} x{diff}  ({added_lbl[lang]})'); add[ref] += diff
+            else:        lines.append(f'     - {ref} x{abs(diff)}  ({removed_lbl[lang]})'); rem[ref] += abs(diff)
+        return lines, add, rem
+
+    # --- Walk both break lists in parallel ---
+    xi, ji = 0, 0
+    while xi < len(xml_breaks) and ji < len(json_breaks):
+        xb = xml_breaks[xi]
+        jb = json_breaks[ji]
+        x_anc = xb['anchor_id']
+        j_anc = jb.get('after_program_raw', '')
+
+        if x_anc == j_anc:
+            # Perfect match
+            lines, add, rem = _compare_pair(xb, jb)
+            issues.extend(lines)
+            all_added.update(add)
+            all_removed.update(rem)
+            xi += 1; ji += 1
+
         else:
-            direction = f'+{diff} {added_lbl[lang]}' if diff > 0 else f'{diff} {removed_lbl[lang]}'
-            diffs.append(T('count_diff', lang, ref=ref, xn=xc, pn=pc) + f'  ({direction})')
+            # Mismatch — look ahead in both directions to recover
+            found_xi = next((i for i in range(xi+1, min(xi+WINDOW, len(xml_breaks)))
+                             if xml_breaks[i]['anchor_id'] == j_anc), None)
+            found_ji = next((i for i in range(ji+1, min(ji+WINDOW, len(json_breaks)))
+                             if json_breaks[i].get('after_program_raw') == x_anc), None)
 
-            # Show break locations for extras in playlist
-            if diff > 0 and ref in break_index:
-                locations = break_index[ref]
-                # The last `diff` occurrences are the ones added (assume appended)
-                extras = locations[-diff:] if len(locations) >= diff else locations
-                for after, st in extras:
-                    diffs.append(f'       → {location_lbl[lang]}: after [{after}] @ {fmt_t(st)}')
+            bs = _break_start(jb)
 
-    if not diffs:
-        return [f'  {T("ok_commercials", lang, n=len(pl_comms))}']
-    return diffs
+            if found_xi is not None and (found_ji is None or (found_xi-xi) <= (found_ji-ji)):
+                # XML has more segments here — pooled comparison
+                xml_block  = xml_breaks[xi:found_xi]
+                json_block = [jb]
+                x_show = normalize_id(x_anc)
+                j_show = normalize_id(j_anc)
+                issues.append(f'  ⚠  {replaced_lbl[lang]}: XML=[{x_show}...] → Playlist=[{j_show}] @ {fmt_t(bs)}')
+                pool_lines, add, rem = _compare_pool(xml_block, json_block, x_show, j_show, bs)
+                if pool_lines:
+                    issues.extend(pool_lines)
+                    warn = f'{manual_cap[lang]}: {replaced_lbl[lang]} [{x_show}→{j_show}] @ {fmt_t(bs)}'
+                    manual_warns.append(warn)
+                    issues.append(f'     ⚠  {warn}')
+                else:
+                    issues.append(f'     ✓ Commercials match within replaced block')
+                all_added.update(add); all_removed.update(rem)
+                xi = found_xi; ji += 1
+
+            elif found_ji is not None:
+                # JSON has more segments here — pooled comparison
+                xml_block  = [xb]
+                json_block = json_breaks[ji:found_ji]
+                x_show = normalize_id(x_anc)
+                j_show = normalize_id(j_anc)
+                issues.append(f'  ⚠  {replaced_lbl[lang]}: XML=[{x_show}] → Playlist=[{j_show}...] @ {fmt_t(bs)}')
+                pool_lines, add, rem = _compare_pool(xml_block, json_block, x_show, j_show, bs)
+                if pool_lines:
+                    issues.extend(pool_lines)
+                    warn = f'{manual_cap[lang]}: {replaced_lbl[lang]} [{x_show}→{j_show}] @ {fmt_t(bs)}'
+                    manual_warns.append(warn)
+                    issues.append(f'     ⚠  {warn}')
+                else:
+                    issues.append(f'     ✓ Commercials match within replaced block')
+                all_added.update(add); all_removed.update(rem)
+                xi += 1; ji = found_ji
+
+            else:
+                # Can't recover — skip both and warn loudly
+                warn = f'{manual_cap[lang]}: {lost_lbl[lang]} [{normalize_id(x_anc)} vs {normalize_id(j_anc)}] @ {fmt_t(bs)}'
+                manual_warns.append(warn)
+                issues.append(f'  ⚠  {warn}')
+                xi += 1; ji += 1
+
+    # --- Summary ---
+    if all_added or all_removed:
+        issues += ['', f'  ── {summary_lbl[lang]} ──']
+        if all_added:
+            total = sum(all_added.values())
+            issues.append(f'  +{total} {added_tot[lang]}:')
+            for ref, cnt in sorted(all_added.items()):
+                issues.append(f'    {ref} x{cnt}')
+        if all_removed:
+            total = sum(all_removed.values())
+            issues.append(f'  -{total} {removed_tot[lang]}:')
+            for ref, cnt in sorted(all_removed.items()):
+                issues.append(f'    {ref} x{cnt}')
+    elif not issues:
+        total_pl = len(playlist['commercials'])
+        issues.append(f'  {T("ok_commercials", lang, n=total_pl)}')
+
+    return issues, manual_warns
 
 
 def check_promo_repeats(playlist, current_start=None, lang='en'):
@@ -601,8 +769,12 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en'):
     lines.append('')
 
     lines.append(f'── [2] {T("section_commercials",lang)} ──')
-    lines += ([T('no_xml', lang)] if not xml_rows else
-              check_commercials_vs_xml(playlist, xml_rows, current_start, lang))
+    manual_warns = []
+    if not xml_rows:
+        lines.append(T('no_xml', lang))
+    else:
+        comm_lines, manual_warns = check_commercials_vs_xml(playlist, xml_rows, current_start, lang)
+        lines += comm_lines
     lines.append('')
 
     lines.append(f'── [3] {T("section_promos",lang)} ──')
@@ -625,4 +797,4 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en'):
         lines.append('')
 
     lines.append(sep)
-    return '\n'.join(lines)
+    return '\n'.join(lines), manual_warns
