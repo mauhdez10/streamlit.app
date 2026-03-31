@@ -151,36 +151,40 @@ if st.button(t('run'), type='primary', use_container_width=True):
     ]
 
     all_manual_warns = []
+    CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐'}
     with st.spinner(t('running')):
         for date_str in sorted_dates:
             d_lines = [f'{"DATE" if lang=="en" else "FECHA"}: {date_str}', '─'*60]
-            for channel in ['catv', 'tvd']:
+            ch_reports = {}  # channel -> lines
+            for channel in ['catv', 'tvd', 'latam', 'us']:
                 if channel not in selected: continue
                 key = (date_str, channel)
                 if key not in days: continue
-                info      = days[key]
-                xml_file  = info.get('xml')
-                grilla_f  = grillas.get(channel)
-                jsons     = sorted(info['json'], key=lambda f: f.name)
+                info     = days[key]
+                xml_file = info.get('xml')
+                grilla_f = grillas.get(channel)
+                jsons    = sorted(info['json'], key=lambda f: f.name)
+                ch_lines = []
                 for jf in jsons:
-                    d_lines.append(f'JSON: {jf.name}')
+                    ch_lines.append(f'JSON: {jf.name}')
                     if xml_file:  xml_file.seek(0)
                     if grilla_f:  grilla_f.seek(0)
                     result = process_one(channel, jf, xml_file, grilla_f)
                     plines, warns = result if isinstance(result, tuple) else (result, [])
-                    d_lines += plines
+                    ch_lines += plines
                     all_manual_warns.extend(warns)
+                ch_reports[channel] = ch_lines
+                d_lines += ch_lines
             d_lines.append('')
-            day_reports[date_str] = d_lines
+            day_reports[date_str] = {'all': d_lines, 'channels': ch_reports}
 
     # ── DISPLAY WITH TABS ─────────────────────────────────────────────────────
     st.subheader(t('report'))
     all_lines = header_lines[:]
     for d in sorted_dates:
-        all_lines += day_reports.get(d, [])
+        all_lines += day_reports.get(d, {}).get('all', [])
     full_text = '\n'.join(all_lines)
 
-    # Display manual check warnings in red
     if all_manual_warns:
         st.error('\n'.join(all_manual_warns))
 
@@ -196,14 +200,47 @@ if st.button(t('run'), type='primary', use_container_width=True):
 
         for i, date_str in enumerate(sorted_dates):
             with tabs[i+1]:
-                day_text = '\n'.join(header_lines + day_reports.get(date_str, []))
-                st.text(day_text)
-                st.download_button(t('dl'), day_text,
+                day_data   = day_reports.get(date_str, {})
+                ch_reports = day_data.get('channels', {})
+                day_text   = '\n'.join(header_lines + day_data.get('all', []))
+
+                if len(ch_reports) > 1:
+                    ch_tab_labels = [CH_DISPLAY.get(ch, ch) for ch in ch_reports]
+                    ch_tabs = st.tabs(ch_tab_labels)
+                    for j, (ch, ch_lines) in enumerate(ch_reports.items()):
+                        with ch_tabs[j]:
+                            ch_text = '\n'.join(header_lines + [f'DATE: {date_str}', '─'*60] + ch_lines)
+                            st.text(ch_text)
+                            st.download_button(t('dl'), ch_text,
+                                               file_name=f'report_{date_str}_{ch}_{datetime.now().strftime("%H%M%S")}.txt',
+                                               mime='text/plain', use_container_width=True,
+                                               key=f'dl_{date_str}_{ch}')
+                else:
+                    st.text(day_text)
+
+                st.download_button(t('dl') + f' ({date_str})', day_text,
                                    file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
                                    mime='text/plain', use_container_width=True,
-                                   key=f'dl_{date_str}')
+                                   key=f'dl_{date_str}_all')
     else:
-        st.text(full_text)
+        # Single day — show channel tabs if multiple channels
+        day_data   = day_reports.get(sorted_dates[0], {}) if sorted_dates else {}
+        ch_reports = day_data.get('channels', {})
+
+        if len(ch_reports) > 1:
+            ch_tab_labels = [CH_DISPLAY.get(ch, ch) for ch in ch_reports]
+            ch_tabs = st.tabs(ch_tab_labels)
+            for j, (ch, ch_lines) in enumerate(ch_reports.items()):
+                with ch_tabs[j]:
+                    ch_text = '\n'.join(header_lines + ch_lines)
+                    st.text(ch_text)
+                    st.download_button(t('dl'), ch_text,
+                                       file_name=f'report_{sorted_dates[0]}_{ch}_{datetime.now().strftime("%H%M%S")}.txt',
+                                       mime='text/plain', use_container_width=True,
+                                       key=f'dl_single_{ch}')
+        else:
+            st.text(full_text)
+
         st.download_button(t('dl'), full_text,
                            file_name=f'report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
-                           mime='text/plain', use_container_width=True)
+                           mime='text/plain', use_container_width=True, key='dl_single_all')
