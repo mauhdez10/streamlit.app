@@ -1,5 +1,5 @@
 """
-Broadcast Playlist Checker — Streamlit App v5
+Broadcast Playlist Checker — Streamlit App v6
 """
 import streamlit as st
 import json
@@ -13,86 +13,78 @@ from checker import (
 
 st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
 
-# ── LANGUAGE TOGGLE ───────────────────────────────────────────────────────────
-lang = st.radio('🌐 Language / Idioma', ['English', 'Español'],
-                horizontal=True, label_visibility='collapsed')
+# ── LANGUAGE ──────────────────────────────────────────────────────────────────
+lang = st.radio('🌐', ['English', 'Español'], horizontal=True, label_visibility='collapsed')
 lang = 'es' if lang == 'Español' else 'en'
-TITLES = {'en': '📋 Broadcast Playlist Checker', 'es': '📋 Verificador de Playlist'}
-UPLOAD_LABEL = {'en': 'Drop all files here — auto-detected by filename (JSON, XML, XLSX)',
-                'es': 'Arrastra todos los archivos aquí — detección automática (JSON, XML, XLSX)'}
-RUN_BTN = {'en': '▶  Run Check', 'es': '▶  Ejecutar Verificación'}
-DL_BTN  = {'en': '⬇ Download Report (.txt)', 'es': '⬇ Descargar Reporte (.txt)'}
-DETECTED_LBL = {'en': 'Detected files:', 'es': 'Archivos detectados:'}
-UNKNOWN_LBL  = {'en': 'Unrecognized:', 'es': 'No reconocidos:'}
 
-st.title(TITLES[lang])
+L = {
+    'title':    {'en': '📋 Broadcast Playlist Checker',             'es': '📋 Verificador de Playlist'},
+    'upload':   {'en': 'Drop all files here — auto-detected (JSON, XML, XLSX)', 'es': 'Arrastra archivos aquí — detección automática (JSON, XML, XLSX)'},
+    'run':      {'en': '▶  Run Check',                              'es': '▶  Verificar'},
+    'dl':       {'en': '⬇ Download Report (.txt)',                  'es': '⬇ Descargar Reporte (.txt)'},
+    'detected': {'en': '**Detected files:**',                       'es': '**Archivos detectados:**'},
+    'unknown':  {'en': '⚠ Unrecognized:',                          'es': '⚠ No reconocidos:'},
+    'hint':     {'en': 'JSON → promo check  |  +XML → commercial check  |  +Grilla → program check',
+                 'es': 'JSON → promos  |  +XML → comerciales  |  +Grilla → programas'},
+    'channels': {'en': 'Channels to check:',                        'es': 'Canales a verificar:'},
+    'tab_all':  {'en': '📋 All',                                    'es': '📋 Todo'},
+    'no_json':  {'en': 'Upload at least one Vipe JSON.',            'es': 'Sube al menos un JSON de Vipe.'},
+    'report':   {'en': '📄 Report',                                 'es': '📄 Reporte'},
+    'running':  {'en': 'Running checks...',                         'es': 'Verificando...'},
+}
+def t(k): return L[k][lang]
 
-# ── SINGLE UPLOAD ─────────────────────────────────────────────────────────────
-uploaded = st.file_uploader(
-    UPLOAD_LABEL[lang],
-    accept_multiple_files=True,
-    type=None,
-    key='all_files'
-)
+st.title(t('title'))
 
+# ── UPLOAD ────────────────────────────────────────────────────────────────────
+uploaded = st.file_uploader(t('upload'), accept_multiple_files=True, type=None, key='all_files')
 days, grillas, unknown_files = detect_files(uploaded) if uploaded else ({}, {}, [])
 
-# ── DETECTION SUMMARY ─────────────────────────────────────────────────────────
+# ── DETECTION TABLE ───────────────────────────────────────────────────────────
 if uploaded:
-    st.markdown(f'**{DETECTED_LBL[lang]}**')
-
-    # Show all detected files in one scrollable table
-    all_detected = []
+    st.markdown(t('detected'))
+    rows = []
     for (date_str, channel), info in sorted(days.items()):
-        ch_label = 'CATV 🌎' if channel == 'catv' else 'TVD 📺'
+        ch = 'CATV 🌎' if channel == 'catv' else 'TVD 📺'
+        # Format date as MM/DD for display
+        try:
+            from datetime import datetime as _dt
+            d = _dt.strptime(date_str, '%Y-%m-%d')
+            short_date = d.strftime('%m/%d')
+        except: short_date = date_str
         for jf in info['json']:
-            all_detected.append({'Date': date_str, 'Channel': ch_label,
-                                  'Type': 'JSON', 'File': jf.name})
+            rows.append({'Date': date_str, 'Channel': ch,
+                         'Type': f'Playlist {short_date}', 'File': jf.name})
         if info['xml']:
-            all_detected.append({'Date': date_str, 'Channel': ch_label,
-                                  'Type': 'XML', 'File': info['xml'].name})
-    for ch, gf in grillas.items():
-        ch_label = 'CATV 🌎' if ch == 'catv' else 'TVD 📺'
-        all_detected.append({'Date': '(week)', 'Channel': ch_label,
-                              'Type': 'Grilla', 'File': gf.name})
-    if unknown_files:
-        for uf in unknown_files:
-            all_detected.append({'Date': '?', 'Channel': '?', 'Type': '?', 'File': uf.name})
-
-    if all_detected:
+            rows.append({'Date': date_str, 'Channel': ch, 'Type': 'Log', 'File': info['xml'].name})
+    for ch_key, gf in grillas.items():
+        ch = 'CATV 🌎' if ch_key == 'catv' else 'TVD 📺'
+        rows.append({'Date': '(Week)', 'Channel': ch, 'Type': 'Grilla', 'File': gf.name})
+    for uf in unknown_files:
+        rows.append({'Date': '?', 'Channel': '?', 'Type': '?', 'File': uf.name})
+    if rows:
         import pandas as pd
-        df = pd.DataFrame(all_detected)
-        st.dataframe(df, use_container_width=True, hide_index=True, height=min(400, 35 + len(all_detected)*35))
-
-    st.caption('💡 JSON → promo check  |  + XML → commercial check  |  + Grilla → program check')
+        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                     hide_index=True, height=min(400, 35 + len(rows)*35))
+    st.caption(t('hint'))
     st.divider()
 
 # ── CHANNEL SELECTOR ──────────────────────────────────────────────────────────
-available_channels = sorted(set(ch for (_, ch) in days.keys()) | set(grillas.keys()))
-if available_channels:
-    ch_options = {'catv': 'CATV 🌎', 'tvd': 'TVD 📺'}
-    selected_channels = st.multiselect(
-        'Channels to check:' if lang == 'en' else 'Canales a verificar:',
-        options=available_channels,
-        default=available_channels,
-        format_func=lambda x: ch_options.get(x, x)
+available = sorted(set(ch for (_, ch) in days.keys()) | set(grillas.keys()))
+if available:
+    selected = st.multiselect(
+        t('channels'), options=available, default=available,
+        format_func=lambda x: 'CATV 🌎' if x == 'catv' else 'TVD 📺'
     )
 else:
-    selected_channels = []
+    selected = []
 
 # ── RUN ───────────────────────────────────────────────────────────────────────
-if st.button(RUN_BTN[lang], type='primary', use_container_width=True):
+if st.button(t('run'), type='primary', use_container_width=True):
     if not days:
-        st.error('Upload at least one Vipe JSON.' if lang == 'en' else 'Sube al menos un JSON de Vipe.')
-        st.stop()
+        st.error(t('no_json')); st.stop()
 
-    report_lines = [
-        'BROADCAST PLAYLIST CHECK REPORT' if lang == 'en' else 'REPORTE DE VERIFICACIÓN DE PLAYLIST',
-        f'Generated / Generado: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
-        '═' * 60, ''
-    ]
-
-    def process_one(channel, json_file, xml_file, grilla_file, date):
+    def process_one(channel, json_file, xml_file, grilla_file):
         lines = []
         try:
             json_file.seek(0)
@@ -100,70 +92,82 @@ if st.button(RUN_BTN[lang], type='primary', use_container_width=True):
             playlist = parse_json_playlist(data)
         except Exception as e:
             return [f'ERROR parsing JSON: {e}']
-
         xml_rows = []
         if xml_file:
-            try:
-                xml_file.seek(0)
-                xml_rows = parse_xml_log(xml_file)
-            except Exception as e:
-                lines.append(f'  WARNING: XML error: {e}')
-
+            try: xml_file.seek(0); xml_rows = parse_xml_log(xml_file)
+            except Exception as e: lines.append(f'  WARNING: XML error: {e}')
         grilla_ids = []
         if grilla_file and playlist['date']:
-            try:
-                grilla_file.seek(0)
-                grilla_ids = parse_grilla(grilla_file, playlist['date'])
-            except Exception as e:
-                lines.append(f'  WARNING: Grilla error: {e}')
-
+            try: grilla_file.seek(0); grilla_ids = parse_grilla(grilla_file, playlist['date'])
+            except Exception as e: lines.append(f'  WARNING: Grilla error: {e}')
         if not xml_rows and not grilla_ids:
             pi = check_promo_repeats(playlist, lang=lang)
-            sep = '═' * 60
             ch_label = 'CATV' if channel == 'catv' else 'TVD'
-            lines += [sep,
-                      f'CHANNEL: {ch_label} | DATE: {playlist["date"]} | PROMO CHECK ONLY',
-                      sep]
+            lines += ['═'*60,
+                      f'CHANNEL: {ch_label} | DATE: {playlist["date"]} | {"PROMO CHECK" if lang=="en" else "VERIFICACIÓN DE PROMOS"}',
+                      '═'*60]
             lines += pi if pi else ['  ✓ No repeated promos']
             lines.append('')
             return lines
-
         lines.append(generate_report('CATV' if channel=='catv' else 'TVD',
                                      playlist, xml_rows, grilla_ids, lang))
         return lines
 
-    with st.spinner('Running checks...' if lang == 'en' else 'Verificando...'):
-        # Process by date then channel
-        dates_sorted = sorted(set(d for (d, _) in days.keys()))
-        for date_str in dates_sorted:
-            report_lines.append(f'{"DATE" if lang=="en" else "FECHA"}: {date_str}')
-            report_lines.append('─' * 60)
+    # Build per-day reports
+    sorted_dates = sorted(set(d for (d, _) in days.keys()))
+    day_reports  = {}  # date_str -> list of lines
+    header_lines = [
+        'BROADCAST PLAYLIST CHECK REPORT' if lang=='en' else 'REPORTE DE VERIFICACIÓN DE PLAYLIST',
+        f'Generated / Generado: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+        '═'*60, ''
+    ]
 
+    with st.spinner(t('running')):
+        for date_str in sorted_dates:
+            d_lines = [f'{"DATE" if lang=="en" else "FECHA"}: {date_str}', '─'*60]
             for channel in ['catv', 'tvd']:
-                if channel not in selected_channels:
-                    continue
+                if channel not in selected: continue
                 key = (date_str, channel)
-                if key not in days:
-                    continue
-
-                info     = days[key]
-                xml_file = info.get('xml')
-                grilla_f = grillas.get(channel)
-                jsons    = sorted(info['json'], key=lambda f: f.name)
-
-                ch_label = 'CATV 🌎' if channel == 'catv' else 'TVD 📺'
-
+                if key not in days: continue
+                info      = days[key]
+                xml_file  = info.get('xml')
+                grilla_f  = grillas.get(channel)
+                jsons     = sorted(info['json'], key=lambda f: f.name)
                 for jf in jsons:
-                    report_lines.append(f'JSON: {jf.name}')
-                    if xml_file: xml_file.seek(0)
-                    if grilla_f: grilla_f.seek(0)
-                    report_lines += process_one(channel, jf, xml_file, grilla_f, date_str)
+                    d_lines.append(f'JSON: {jf.name}')
+                    if xml_file:  xml_file.seek(0)
+                    if grilla_f:  grilla_f.seek(0)
+                    d_lines += process_one(channel, jf, xml_file, grilla_f)
+            d_lines.append('')
+            day_reports[date_str] = d_lines
 
-            report_lines.append('')
+    # ── DISPLAY WITH TABS ─────────────────────────────────────────────────────
+    st.subheader(t('report'))
+    all_lines = header_lines[:]
+    for d in sorted_dates:
+        all_lines += day_reports.get(d, [])
+    full_text = '\n'.join(all_lines)
 
-    report_text = '\n'.join(report_lines)
-    st.subheader('📄 Report' if lang == 'en' else '📄 Reporte')
-    st.text(report_text)
-    st.download_button(DL_BTN[lang], report_text,
-                       file_name=f'broadcast_check_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
-                       mime='text/plain', use_container_width=True)
+    if len(sorted_dates) > 1:
+        tab_labels = [t('tab_all')] + [f'📅 {d}' for d in sorted_dates]
+        tabs = st.tabs(tab_labels)
+
+        with tabs[0]:
+            st.text(full_text)
+            st.download_button(t('dl'), full_text,
+                               file_name=f'report_all_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
+                               mime='text/plain', use_container_width=True, key='dl_all')
+
+        for i, date_str in enumerate(sorted_dates):
+            with tabs[i+1]:
+                day_text = '\n'.join(header_lines + day_reports.get(date_str, []))
+                st.text(day_text)
+                st.download_button(t('dl'), day_text,
+                                   file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
+                                   mime='text/plain', use_container_width=True,
+                                   key=f'dl_{date_str}')
+    else:
+        st.text(full_text)
+        st.download_button(t('dl'), full_text,
+                           file_name=f'report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
+                           mime='text/plain', use_container_width=True)

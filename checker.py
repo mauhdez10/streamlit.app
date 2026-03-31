@@ -44,7 +44,7 @@ _S = {
     'promo_rep':          {'en': '  ⚠  PROMO REPEAT after [{after}] @ {t}: {ref} {n}x', 'es': '  ⚠  PROMO REPETIDA después de [{after}] @ {t}: {ref} {n}x'},
     'ni_program':         {'en': '  ⚠  NOT INGESTED [Program]: {id} @ {t} | {show}', 'es': '  ⚠  NO INGESTADO [Programa]: {id} @ {t} | {show}'},
     'ni_other':           {'en': '  ⚠  NOT INGESTED [{typ}]: {ref} @ {t} | {name}', 'es': '  ⚠  NO INGESTADO [{typ}]: {ref} @ {t} | {name}'},
-    'bug_line':           {'en': '  🔲 {beh} Cmd:{cmd} — {id} @ {t} | {show}', 'es': '  🔲 {beh} Cmd:{cmd} — {id} @ {t} | {show}'},
+    'bug_line':           {'en': '  🔲 {beh_label} : {cmd} — {id} @ {t} | {show}', 'es': '  🔲 {beh_label} : {cmd} — {id} @ {t} | {show}'},
 }
 
 def T(key, lang='en', **kwargs):
@@ -83,7 +83,7 @@ def fmt_t(dt):
     """UTC / ET string."""
     if dt is None: return '??:??:?? UTC'
     et, tz = utc_to_et(dt)
-    return f'{dt.strftime("%H:%M:%S")} UTC / {et.strftime("%H:%M:%S")} {tz}'
+    return f'{dt.strftime("%H:%M:%S")} UTC / {et.strftime("%H:%M:%S")} ET'
 
 def parse_timecode(tc):
     try:
@@ -229,37 +229,17 @@ def parse_xml_log(filepath_or_bytes):
 def xml_commercials(rows):
     return [r for r in rows if r.get('contenttype') == 'COMMERCIAL']
 
-def find_xml_anchor(programs, xml_rows, current_start):
+def find_xml_anchor_by_extid(events, xml_rows):
     """
-    Find anchor in XML using first program segment from partial JSON.
-    Matches by segment raw ID + closest time-of-day in XML.
+    Find where partial JSON starts in XML using externalid/reference match.
     Returns start index in xml_rows for commercial comparison.
     """
-    if not current_start: return 0
-    first_seg = next((p for p in programs if p['start'] and p['start'] >= current_start), None)
-    if not first_seg: return 0
-
-    seg_raw = first_seg['episode_id_raw']   # e.g. MANGU0330_6
-    seg_tod = first_seg['start'].hour*3600 + first_seg['start'].minute*60 + first_seg['start'].second
-
-    candidates = []
-    for i, row in enumerate(xml_rows):
-        if row['mediaid'] == seg_raw:
-            xt = parse_xml_time(row['startat'])
-            if xt:
-                xt_tod = xt.hour*3600 + xt.minute*60 + xt.second
-                candidates.append((i, abs(xt_tod - seg_tod)))
-
-    if not candidates:
-        # Fallback: externalid match on first JSON event
-        ext_idx = {r['externalid']: i for i, r in enumerate(xml_rows)}
-        for ev in programs[:3]:
-            # Find any event ref from the playlist events (stored in seg raw)
-            pass
-        return 0
-
-    best_idx = min(candidates, key=lambda x: x[1])[0]
-    return best_idx
+    ext_idx = {row['externalid']: i for i, row in enumerate(xml_rows)}
+    for ev in events:
+        ref = ev.get('reference', '')
+        if ref in ext_idx:
+            return ext_idx[ref]
+    return 0
 
 
 # ── GRILLA PARSER ─────────────────────────────────────────────────────────────
@@ -331,22 +311,47 @@ def extract_date_from_filename(name):
         except: pass
     return None
 
+def _date_from_json_content(f):
+    """Extract date from JSON file content (first event's startTime). Most reliable."""
+    try:
+        f.seek(0)
+        data = json.load(f)
+        f.seek(0)
+        for ev in data.get('events', []):
+            tc = ev.get('startTime', '')
+            if tc:
+                m = re.search(r'(\d{4})-(\d{2})-(\d{2})', tc)
+                if m:
+                    return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+    except: pass
+    return None
+
+def _date_from_xml_filename(name):
+    """XML filenames are always MMDDYYYY: TVD03302026.xml, CA03302026.xml."""
+    m = re.search(r'(\d{2})(\d{2})(\d{4})', name)
+    if m:
+        try: return datetime(int(m.group(3)), int(m.group(1)), int(m.group(2))).date()
+        except: pass
+    return None
+
 def detect_files(uploaded_files):
     """
     Group uploaded files by (date, channel).
-    Grillas are separate (one per channel, cover whole week).
+    JSON: date always from content (startTime). Works for renamed files.
+    XML:  date from filename (MMDDYYYY pattern, always reliable).
+    Grilla: week-based, stored by channel only.
     Returns: days dict, grillas dict, unknown list.
     """
-    days    = {}   # {(date_str, channel): {'json': [files], 'xml': file, 'date': date}}
-    grillas = {}   # {channel: file}
+    days    = {}
+    grillas = {}
     unknown = []
 
     for f in uploaded_files:
         name_up = f.name.upper()
         ext = f.name.lower().rsplit('.', 1)[-1] if '.' in f.name else ''
 
-        if ext == 'json':       ftype = 'json'
-        elif ext == 'xml':      ftype = 'xml'
+        if ext == 'json':            ftype = 'json'
+        elif ext == 'xml':           ftype = 'xml'
         elif ext in ('xlsx','xlsm'): ftype = 'grilla'
         else: unknown.append(f); continue
 
@@ -364,8 +369,15 @@ def detect_files(uploaded_files):
             grillas[channel] = f
             continue
 
-        date = extract_date_from_filename(f.name)
-        if date is None: unknown.append(f); continue
+        # Date extraction
+        if ftype == 'json':
+            date = _date_from_json_content(f)    # always from content
+        else:  # xml
+            date = _date_from_xml_filename(f.name)  # always from filename
+
+        if date is None:
+            unknown.append(f)
+            continue
 
         key = (str(date), channel)
         if key not in days:
@@ -433,11 +445,14 @@ def check_programs_vs_grilla(playlist, grilla_ids, current_start, lang):
 
 
 def check_commercials_vs_xml(playlist, xml_rows, current_start, lang):
-    all_comms = playlist['commercials']
-    anchor = find_xml_anchor(playlist['programs'], xml_rows, current_start) if current_start else 0
-    xml_rows_use = xml_rows[anchor:]
-    pl_comms = [c for c in all_comms if not current_start or (c['start'] and c['start'] >= current_start)]
-
+    # Partial: anchor XML via externalid of first JSON event; use ALL playlist commercials
+    # Full: compare everything
+    if current_start:
+        anchor = find_xml_anchor_by_extid(playlist['events'], xml_rows)
+        xml_rows_use = xml_rows[anchor:]
+    else:
+        xml_rows_use = xml_rows
+    pl_comms = playlist['commercials']  # all in JSON (partial or full)
     pl_set  = Counter(c['asset_ref'] for c in pl_comms)
     xml_set = Counter(r['mediaid'] for r in xml_commercials(xml_rows_use))
 
@@ -519,7 +534,8 @@ def check_bugs(playlist, current_start=None, lang='en'):
     lines = []
     for ep_id, info in sorted(first_seg.items(), key=lambda x: x[1]['start'] or datetime.min):
         segs = seg_count.get(ep_id, 1)
-        lines.append(T('bug_line', lang, beh=info['behavior'], cmd=info['cmd'],
+        beh_label = 'Bug Server' if info['behavior'] == 'LOGOHD_ANI' else 'Bug Live'
+        lines.append(T('bug_line', lang, beh_label=beh_label, cmd=info['cmd'],
                        id=ep_id, t=fmt_t(info['start']), show=f'{info["show"]} ({segs} segs)'))
     return lines
 
