@@ -118,7 +118,9 @@ def is_episode_id(val):
 def normalize_id(ep_id):
     if not ep_id: return ''
     ep_id = re.sub(r'_\d+$', '', str(ep_id).strip())
-    ep_id = re.sub(r'([A-Za-z][A-Za-z0-9]*)0{2,}(\d{3,})',
+    # Only normalize extra leading zeros before 4+ digit date suffixes (e.g. COSA00327→COSA0327)
+    # Do NOT touch 3-digit episode numbers (e.g. LATPAN001 stays LATPAN001)
+    ep_id = re.sub(r'([A-Za-z][A-Za-z0-9]*)0{2,}(\d{4,})',
                    lambda m: m.group(1) + (m.group(2)[-4:] if len(m.group(2)) > 4 else m.group(2)),
                    ep_id)
     return ep_id.upper()
@@ -290,7 +292,14 @@ def find_xml_anchor_by_extid(events, xml_rows):
 
 # ── GRILLA PARSER ─────────────────────────────────────────────────────────────
 
-def parse_grilla(filepath_or_bytes, target_date):
+def parse_grilla(filepath_or_bytes, target_date, channel='catv'):
+    """Route to the correct grilla parser based on channel type."""
+    if channel in ('latam', 'us'):
+        return _parse_grilla_pasiones(filepath_or_bytes, target_date)
+    return _parse_grilla_catv_tvd(filepath_or_bytes, target_date)
+
+def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
+    """Original CATV/TVD grilla parser — single active sheet, datetime header."""
     from openpyxl import load_workbook
     import io
     if isinstance(filepath_or_bytes, str):
@@ -339,6 +348,75 @@ def parse_grilla(filepath_or_bytes, target_date):
         val = row[target_col] if target_col < len(row) else None
         for ep in extract_ids(val):
             if ep: episode_ids.append(ep)
+    return episode_ids
+
+def _parse_date_str(val, force_year=None):
+    """Parse date from string like 'Lun. / Mon. 03/30/26'.
+    force_year overrides the year in the string (handles typos like 03/30/25 when it should be 2026)."""
+    if not val: return None
+    m = re.search(r'(\d{1,2})/(\d{1,2})/(\d{2,4})', str(val))
+    if m:
+        mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if force_year:
+            y = force_year
+        else:
+            y = 2000 + y if y < 100 else y
+        try: return datetime(y, mo, d).date()
+        except: pass
+    return None
+
+def _parse_grilla_pasiones(filepath_or_bytes, target_date):
+    """
+    Pasiones grilla parser — multi-tab yearly workbook.
+    Scans tabs last→first, finds the one containing target_date.
+    Header row contains date strings like 'Mar. / Tue. 03/31/26'.
+    Episode IDs are in alternating rows (show name row, then ID row).
+    """
+    from openpyxl import load_workbook
+    import io
+    if isinstance(filepath_or_bytes, str):
+        wb = load_workbook(filepath_or_bytes, read_only=True)
+    else:
+        raw = filepath_or_bytes.read() if hasattr(filepath_or_bytes, 'read') else filepath_or_bytes
+        wb = load_workbook(io.BytesIO(raw), read_only=True)
+
+    target_ws = None
+    target_col = None
+
+    for name in reversed(wb.sheetnames):
+        ws = wb[name]
+        rows = list(ws.iter_rows(max_row=3, values_only=True))
+        if len(rows) < 2: continue
+        header = rows[1]
+        # Use target_date's year to avoid typos in spreadsheet year field
+        col_dates = [(i, _parse_date_str(cell, force_year=target_date.year))
+                     for i, cell in enumerate(header)
+                     if _parse_date_str(cell, force_year=target_date.year)]
+        if not col_dates: continue
+        first_d = col_dates[0][1]
+        last_d  = col_dates[-1][1]
+        if first_d <= target_date <= last_d:
+            for col_i, d in col_dates:
+                if d == target_date:
+                    target_col = col_i
+                    target_ws  = ws
+                    # Re-read full sheet
+                    all_rows = list(ws.iter_rows(values_only=True))
+                    break
+            break
+
+    if target_ws is None or target_col is None:
+        return []
+
+    # Episode IDs are in the non-time, non-None cells in the target column
+    # Alternating pattern: show title row, episode ID row
+    episode_ids = []
+    for row in all_rows[2:]:
+        val = row[target_col] if target_col < len(row) else None
+        if val and isinstance(val, str):
+            val = val.strip()
+            if is_episode_id(val):
+                episode_ids.append(normalize_id(val))
     return episode_ids
 
 
@@ -405,10 +483,14 @@ def detect_files(uploaded_files):
         if ext == 'xml':
             if name_up.startswith('CA'):    channel = 'catv'
             elif name_up.startswith('TVD'): channel = 'tvd'
+            elif name_up.startswith('PL'):  channel = 'latam'
+            elif name_up.startswith('PUS'): channel = 'us'
             else: unknown.append(f); continue
         else:
-            if 'CATV' in name_up:   channel = 'catv'
-            elif 'TVD' in name_up:  channel = 'tvd'
+            if 'CATV' in name_up:            channel = 'catv'
+            elif 'TVD' in name_up:           channel = 'tvd'
+            elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up: channel = 'latam'
+            elif 'PASIONES_US' in name_up or 'PASIONES US' in name_up:       channel = 'us'
             else: unknown.append(f); continue
 
         if ftype == 'grilla':
@@ -665,18 +747,38 @@ def check_commercials_vs_xml(playlist, xml_rows, current_start, lang):
 
 
 def check_promo_repeats(playlist, current_start=None, lang='en'):
+    INFOMERCIAL_SECS = 1200  # 20 min
     issues = []
+
     for brk in playlist['breaks']:
         items = brk['items']
         if not items: continue
         bs = next((i['start'] for i in items if i.get('start')), None)
         if current_start and bs and bs < current_start: continue
-        promo_refs = [i['ref'] for i in items if i['type'] == 'Promotion']
-        for ref, cnt in Counter(promo_refs).items():
-            if cnt > 1:
-                issues.append(T('promo_rep', lang, after=brk.get('after_program','?'),
-                                t=fmt_t(bs), ref=ref, n=cnt))
-    return issues
+
+        # Split break at infomercials (Commercial ≥ 20min) — they act as sub-break separators
+        sub_breaks = []
+        current_sub = []
+        for item in items:
+            if item['type'] == 'Commercial' and parse_duration(item.get('duration','00:00:00')) >= INFOMERCIAL_SECS:
+                if current_sub:
+                    sub_breaks.append(current_sub)
+                current_sub = []  # reset after infomercial
+            else:
+                current_sub.append(item)
+        if current_sub:
+            sub_breaks.append(current_sub)
+        if not sub_breaks:
+            sub_breaks = [items]
+
+        for sub in sub_breaks:
+            promo_refs = [i['ref'] for i in sub if i['type'] == 'Promotion']
+            for ref, cnt in Counter(promo_refs).items():
+                if cnt > 1:
+                    after = brk.get('after_program', '?')
+                    sub_start = next((i['start'] for i in sub if i.get('start')), bs)
+                    issues.append(T('promo_rep', lang, after=after,
+                                    t=fmt_t(sub_start), ref=ref, n=cnt))
 
 
 def check_not_ingested(playlist, current_start=None, lang='en'):

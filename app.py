@@ -43,9 +43,10 @@ days, grillas, unknown_files = detect_files(uploaded) if uploaded else ({}, {}, 
 # ── DETECTION TABLE ───────────────────────────────────────────────────────────
 if uploaded:
     st.markdown(t('detected'))
+    CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐'}
     rows = []
     for (date_str, channel), info in sorted(days.items()):
-        ch = 'CATV 🌎' if channel == 'catv' else 'TVD 📺'
+        ch = CH_DISPLAY.get(channel, channel.upper())
         # Format date as MM/DD for display
         try:
             from datetime import datetime as _dt
@@ -61,7 +62,7 @@ if uploaded:
 
     # For grillas, read the week-start Monday date from the file content
     for ch_key, gf in grillas.items():
-        ch = 'CATV 🌎' if ch_key == 'catv' else 'TVD 📺'
+        ch = CH_DISPLAY.get(ch_key, ch_key.upper())
         grilla_date_str = '(Week)'
         try:
             from openpyxl import load_workbook
@@ -93,7 +94,7 @@ available = sorted(set(ch for (_, ch) in days.keys()) | set(grillas.keys()))
 if available:
     selected = st.multiselect(
         t('channels'), options=available, default=available,
-        format_func=lambda x: 'CATV 🌎' if x == 'catv' else 'TVD 📺'
+        format_func=lambda x: {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐'}.get(x,x)
     )
 else:
     selected = []
@@ -103,6 +104,11 @@ if st.button(t('run'), type='primary', use_container_width=True):
     if not days:
         st.error(t('no_json')); st.stop()
 
+    CH_LABELS = {
+        'catv': 'CATV', 'tvd': 'TVD',
+        'latam': 'Pasiones Latam', 'us': 'Pasiones US'
+    }
+
     def process_one(channel, json_file, xml_file, grilla_file):
         lines = []
         try:
@@ -110,26 +116,28 @@ if st.button(t('run'), type='primary', use_container_width=True):
             data = json.load(json_file)
             playlist = parse_json_playlist(data)
         except Exception as e:
-            return [f'ERROR parsing JSON: {e}']
+            return [f'ERROR parsing JSON: {e}'], []
         xml_rows = []
         if xml_file:
             try: xml_file.seek(0); xml_rows = parse_xml_log(xml_file)
             except Exception as e: lines.append(f'  WARNING: XML error: {e}')
         grilla_ids = []
         if grilla_file and playlist['date']:
-            try: grilla_file.seek(0); grilla_ids = parse_grilla(grilla_file, playlist['date'])
+            try:
+                grilla_file.seek(0)
+                grilla_ids = parse_grilla(grilla_file, playlist['date'], channel)
             except Exception as e: lines.append(f'  WARNING: Grilla error: {e}')
         if not xml_rows and not grilla_ids:
             pi = check_promo_repeats(playlist, lang=lang)
-            ch_label = 'CATV' if channel == 'catv' else 'TVD'
+            ch_label = CH_LABELS.get(channel, channel.upper())
             lines += ['═'*60,
                       f'CHANNEL: {ch_label} | DATE: {playlist["date"]} | {"PROMO CHECK" if lang=="en" else "VERIFICACIÓN DE PROMOS"}',
                       '═'*60]
             lines += pi if pi else ['  ✓ No repeated promos']
             lines.append('')
             return lines, []
-        report_text, manual_warns = generate_report('CATV' if channel=='catv' else 'TVD',
-                                                     playlist, xml_rows, grilla_ids, lang)
+        ch_label = CH_LABELS.get(channel, channel.upper())
+        report_text, manual_warns = generate_report(ch_label, playlist, xml_rows, grilla_ids, lang)
         lines.append(report_text)
         return lines, manual_warns
 
