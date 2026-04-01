@@ -9,10 +9,15 @@ sys.path.insert(0, os.path.dirname(__file__))
 from checker import (
     parse_json_playlist, parse_xml_log, parse_xml_log_tn, parse_grilla,
     generate_report, check_promo_repeats, detect_files,
-    parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP
+    parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP,
+    parse_sony_json_markers
 )
 
-st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
+SONY_EMOJI = {
+    'A1':'🅰️','A2':'🅰️','A3':'🅰️','A4':'🅰️','A5':'🅰️','A6':'🅰️',
+    'F1':'🎬','F4':'🎬',
+    'S1':'📡','S2':'📡','S3':'📡','S4':'📡','S5':'📡','S6':'📡',
+}
 
 # ── LANGUAGE ──────────────────────────────────────────────────────────────────
 lang = st.radio('🌐', ['English', 'Español'], horizontal=True, label_visibility='collapsed')
@@ -87,7 +92,7 @@ if uploaded:
     # Sony files
     for sf in sony_files_raw:
         ch_name = SONY_CHANNEL_MAP.get(sf['code'], sf['code'])
-        ch_display = f'{sf["code"]} {ch_name}'
+        ch_display = f'{sf["code"]} {SONY_EMOJI.get(sf["code"],"📺")} {ch_name}'
         # Extract date from XML filename or JSON content
         from checker import _date_from_xml_filename, _date_from_json_content, extract_sony_version
         if sf['ftype'] == 'xml':
@@ -114,7 +119,7 @@ sony_codes_present = sorted(set(sf['code'] for sf in sony_files_raw))
 all_options = available + sony_codes_present
 CH_FORMAT = {'catv':'CATV','tvd':'TVD','latam':'Pasiones Latam',
              'us':'Pasiones US','tn':'Fast Todonovelas'}
-CH_FORMAT.update({code: f'{code} {SONY_CHANNEL_MAP.get(code,code)}' for code in sony_codes_present})
+CH_FORMAT.update({code: f'{code} {SONY_EMOJI.get(code,"📺")} {SONY_CHANNEL_MAP.get(code,code)}' for code in sony_codes_present})
 
 if all_options:
     selected_all = st.multiselect(
@@ -215,7 +220,6 @@ if st.button(t('run'), type='primary', use_container_width=True):
     # ── SONY / AXN PROCESSING ─────────────────────────────────────────────────
     sony_report_lines = []
     if sony_files_raw and selected_sony:
-        from checker import parse_sony_json_markers as _psm
         sony_pairings = pair_sony_files(sony_files_raw, lang)
         sep60 = '═' * 60
         for pair in sony_pairings:
@@ -223,7 +227,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
             if pair['code'] not in selected_sony:
                 continue
             # Determine playlist type for header
-            markers_in_json = _psm(pair['json_data']) if pair['json_data'] else []
+            markers_in_json = parse_sony_json_markers(pair['json_data']) if pair['json_data'] else []
             if pair['json_data'] is None:
                 pl_type = '— no JSON —'
             elif markers_in_json:
