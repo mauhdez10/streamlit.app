@@ -232,74 +232,32 @@ if st.button(t('run'), type='primary', use_container_width=True):
             d_lines.append('')
             day_reports[date_str] = {'all': d_lines, 'channels': ch_reports}
 
-    # ── SONY / AXN PROCESSING ─────────────────────────────────────────────────
-    sony_report_lines = []
+    # ── SONY / AXN PROCESSING (single pass) ──────────────────────────────────
+    # Group results by (date, code) to integrate into date tabs like other channels
+    sony_date_ch = {}   # {date_str: {code: lines}}  for tab integration
+    sony_by_code = {}   # {code: lines}               for dedicated Sony tabs
     if sony_files_raw and selected_sony:
-        sony_pairings = pair_sony_files(sony_files_raw, lang)
+        with st.spinner(t('running')):
+            sony_pairings = pair_sony_files(sony_files_raw, lang)
         sep60 = '═' * 60
         for pair in sony_pairings:
-            # Filter by selected channels
             if pair['code'] not in selected_sony:
                 continue
-            # Determine playlist type for header
+            code     = pair['code']
+            date_str = str(pair['date']) if pair['date'] else '?'
             markers_in_json = parse_sony_json_markers(pair['json_data']) if pair['json_data'] else []
-            if pair['json_data'] is None:
-                pl_type = '— no JSON —'
-            elif markers_in_json:
-                pl_type = 'FULL (marker present)'
-            else:
-                pl_type = 'CURRENT (partial)'
-            sony_report_lines.append(sep60)
-            sony_report_lines.append(f'CHANNEL: {pair["code"]} — {pair["channel_name"]}')
-            if pair['date']:
-                sony_report_lines.append(f'DATE: {pair["date"]}')
-            sony_report_lines.append(f'PLAYLIST TYPE: {pl_type}')
-            sony_report_lines.append(f'JSON: {pair["json_file"].name if pair["json_file"] else "— not provided —"}')
-            sony_report_lines.append(f'LOG:  {pair["xml_filename"] or "— not provided —"}')
-            sony_report_lines.append(sep60)
+            if pair['json_data'] is None:   pl_type = SL('pl_none', lang)
+            elif markers_in_json:           pl_type = SL('pl_full', lang)
+            else:                           pl_type = SL('pl_partial', lang)
 
-            if pair['json_data'] is None and pair['xml_file']:
-                sony_report_lines.append('  ℹ  Log provided but no matching JSON found')
-            elif pair['json_data'] is not None and pair['xml_file'] is None:
-                sony_report_lines.append('  ℹ  JSON found but no matching log provided')
-                # Still run marker list
-                try:
-                    r_lines, _ = check_sony(pair['json_data'], [], None, lang)
-                    sony_report_lines += r_lines
-                except: pass
-            elif pair['json_data'] is not None and pair['xml_file'] is not None:
-                try:
-                    pair['xml_file'].seek(0)
-                    xml_rows = parse_sony_xml_log(pair['xml_file'])
-                    r_lines, has_err = check_sony(pair['json_data'], xml_rows,
-                                                   pair['xml_filename'], lang)
-                    sony_report_lines += r_lines
-                except Exception as e:
-                    sony_report_lines.append(f'  ERROR: {e}')
-            sony_report_lines.append('')
-
-    # ── DISPLAY WITH TABS ─────────────────────────────────────────────────────
-    st.subheader(t('report'))
-
-    # Build per-Sony-channel report lines for tabs
-    # sony_pairings grouped by channel code
-    sony_by_code = {}
-    if sony_files_raw and selected_sony:
-        for pair in (pair_sony_files(sony_files_raw, lang) if 'sony_pairings' not in dir() else sony_pairings):
-            if pair['code'] not in selected_sony: continue
-            sony_by_code.setdefault(pair['code'], [])
-            # collect lines for this pairing
-            pairing_lines = []
-            sep60 = '═' * 60
-            markers_in_json = parse_sony_json_markers(pair['json_data']) if pair['json_data'] else []
-            if pair['json_data'] is None: pl_type = SL('pl_none', lang)
-            elif markers_in_json: pl_type = SL('pl_full', lang)
-            else: pl_type = SL('pl_partial', lang)
-            pairing_lines += [sep60, f'CHANNEL: {pair["code"]} — {pair["channel_name"]}']
-            if pair['date']: pairing_lines.append(f'DATE: {pair["date"]}')
-            pairing_lines += [f'PLAYLIST TYPE: {pl_type}',
+            pairing_lines  = [sep60,
+                              f'CHANNEL: {code} — {pair["channel_name"]}',
+                              f'DATE: {date_str}',
+                              f'PLAYLIST TYPE: {pl_type}',
                               f'JSON: {pair["json_file"].name if pair["json_file"] else "— not provided —"}',
-                              f'LOG:  {pair["xml_filename"] or "— not provided —"}', sep60]
+                              f'LOG:  {pair["xml_filename"] or "— not provided —"}',
+                              sep60]
+
             if pair['json_data'] is None and pair['xml_file']:
                 pairing_lines.append(SL('no_json', lang))
             elif pair['json_data'] is not None and pair['xml_file'] is None:
@@ -311,19 +269,32 @@ if st.button(t('run'), type='primary', use_container_width=True):
             elif pair['json_data'] is not None and pair['xml_file'] is not None:
                 try:
                     pair['xml_file'].seek(0)
-                    xml_rows_s = parse_sony_xml_log(pair['xml_file'])
-                    r_lines, _ = check_sony(pair['json_data'], xml_rows_s, pair['xml_filename'], lang)
+                    xml_rows_sony = parse_sony_xml_log(pair['xml_file'])
+                    r_lines, _ = check_sony(pair['json_data'], xml_rows_sony,
+                                            pair['xml_filename'], lang)
                     pairing_lines += r_lines
                 except Exception as e:
                     pairing_lines.append(f'  ERROR: {e}')
             pairing_lines.append('')
-            sony_by_code[pair['code']] += pairing_lines
 
+            # Store under date bucket for tab integration
+            sony_date_ch.setdefault(date_str, {})
+            sony_date_ch[date_str].setdefault(code, [])
+            sony_date_ch[date_str][code] += pairing_lines
+            # Also store per-code for dedicated tabs
+            sony_by_code.setdefault(code, [])
+            sony_by_code[code] += pairing_lines
+
+    # ── BUILD FULL REPORT TEXT ────────────────────────────────────────────────
+    st.subheader(t('report'))
     all_lines = header_lines[:]
     for d in sorted_dates:
         all_lines += day_reports.get(d, {}).get('all', [])
-    if sony_report_lines:
-        all_lines += ['', '── SONY / AXN ──────────────────────────────────'] + sony_report_lines
+    # Add Sony grouped by date
+    for date_str, codes in sorted(sony_date_ch.items()):
+        all_lines += [f'{"DATE" if lang=="en" else "FECHA"}: {date_str} (Sony/AXN)', '─'*60]
+        for code, lines in sorted(codes.items()):
+            all_lines += lines
     full_text = '\n'.join(all_lines)
 
     if all_manual_warns:
@@ -332,20 +303,29 @@ if st.button(t('run'), type='primary', use_container_width=True):
             warn_lines.append(f'  {ch_lbl} — {d_str}: {cnt} block{"s" if cnt>1 else ""} need manual review')
         st.error('\n'.join(warn_lines))
 
-    # Build tab structure: All + per-day (with channel sub-tabs) + per-Sony-channel
-    CH_DISPLAY2 = {**CH_DISPLAY, **{code: f'{code} {SONY_CHANNEL_MAP.get(code,code)}'
-                                     for code in sony_by_code}}
+    # Build tab structure: All + per-date (regular + Sony mixed) + dedicated Sony tabs
+    CH_DISPLAY2 = {**CH_DISPLAY,
+                   **{code: f'{code} {SONY_EMOJI.get(code,"📺")} {SONY_CHANNEL_MAP.get(code,code)}'
+                      for code in sony_by_code}}
+
+    # Merge Sony channels into date reports for unified date tabs
+    all_tab_dates = sorted(set(list(sorted_dates) + list(sony_date_ch.keys())))
 
     def _render_day_tab(date_str, key_prefix):
         day_data   = day_reports.get(date_str, {})
-        ch_reports = day_data.get('channels', {})
-        day_text   = '\n'.join(header_lines + day_data.get('all', []))
+        ch_reports = dict(day_data.get('channels', {}))
+        # Add Sony channels for this date
+        sony_for_date = sony_date_ch.get(date_str, {})
+        for code, lines in sorted(sony_for_date.items()):
+            ch_reports[code] = lines
+        day_text = '\n'.join(header_lines + day_data.get('all', []) +
+                              [l for lines in sony_for_date.values() for l in lines])
         if len(ch_reports) > 1:
-            ch_tab_labels = [CH_DISPLAY.get(ch, ch) for ch in ch_reports]
+            ch_tab_labels = [CH_DISPLAY2.get(ch, ch) for ch in ch_reports]
             ch_tabs = st.tabs(ch_tab_labels)
             for j, (ch, ch_lines) in enumerate(ch_reports.items()):
                 with ch_tabs[j]:
-                    ch_text = '\n'.join(header_lines + [f'DATE: {date_str}', '─'*60] + ch_lines)
+                    ch_text = '\n'.join(header_lines + ch_lines)
                     st.text(ch_text)
                     st.download_button(t('dl'), ch_text,
                                        file_name=f'report_{date_str}_{ch}_{datetime.now().strftime("%H%M%S")}.txt',
@@ -353,22 +333,14 @@ if st.button(t('run'), type='primary', use_container_width=True):
                                        key=f'dl_{key_prefix}_{date_str}_{ch}')
         else:
             st.text(day_text)
-        dl_day_lbl = (f'⬇ {"Current" if lang=="en" else "Actual"} {date_str} (.txt)')
+        dl_day_lbl = f'⬇ {"Current" if lang=="en" else "Actual"} {date_str} (.txt)'
         st.download_button(dl_day_lbl, day_text,
                            file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
                            mime='text/plain', use_container_width=True,
                            key=f'dl_{key_prefix}_{date_str}_all')
 
-    # Decide tab layout
-    has_day_tabs  = len(sorted_dates) > 0
-    has_sony_tabs = bool(sony_by_code)
-    total_tabs    = (1 if (has_day_tabs or has_sony_tabs) else 0)  # "All" tab
-
-    if has_day_tabs or has_sony_tabs:
-        tab_labels = [t('tab_all')]
-        for d in sorted_dates: tab_labels.append(f'📅 {d}')
-        for code, ch_lines in sony_by_code.items():
-            tab_labels.append(f'📺 {code}')
+    if all_tab_dates:
+        tab_labels = [t('tab_all')] + [f'📅 {d}' for d in all_tab_dates]
 
         tabs = st.tabs(tab_labels)
 
@@ -380,22 +352,10 @@ if st.button(t('run'), type='primary', use_container_width=True):
                                file_name=f'report_all_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                                mime='text/plain', use_container_width=True, key='dl_all')
 
-        # Day tabs
-        for i, date_str in enumerate(sorted_dates):
+        # Date tabs (regular channels + Sony merged by date)
+        for i, date_str in enumerate(all_tab_dates):
             with tabs[i+1]:
                 _render_day_tab(date_str, 'day')
-
-        # Sony tabs
-        sony_tab_start = 1 + len(sorted_dates)
-        for i, (code, ch_lines) in enumerate(sony_by_code.items()):
-            with tabs[sony_tab_start + i]:
-                ch_text = '\n'.join(header_lines + ch_lines)
-                st.text(ch_text)
-                dl_lbl2 = f'⬇ {"Current" if lang=="en" else "Actual"} {code} (.txt)'
-                st.download_button(dl_lbl2, ch_text,
-                                   file_name=f'report_{code}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
-                                   mime='text/plain', use_container_width=True,
-                                   key=f'dl_sony_{code}')
     else:
         st.text(full_text)
         dl_lbl3 = '⬇ Full Report (.txt)' if lang=='en' else '⬇ Reporte Completo (.txt)'
