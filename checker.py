@@ -1250,6 +1250,8 @@ def parse_sony_xml_log(filepath_or_bytes):
         elif isinstance(filepath_or_bytes, bytes): content = filepath_or_bytes
         else:
             with open(filepath_or_bytes, 'rb') as f: content = f.read()
+        # Fix unescaped & characters (e.g. "P&G" in title fields)
+        content = re.sub(rb'&(?!amp;|lt;|gt;|apos;|quot;|#)', b'&amp;', content)
         root = ET.fromstring(content)
         rows = []
         for row in root.findall('.//row'):
