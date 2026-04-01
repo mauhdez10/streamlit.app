@@ -554,10 +554,16 @@ def _date_from_json_content(f):
 
 def _date_from_xml_filename(name):
     """XML filenames date extraction.
+    Sony:     YYYYMMDD (A120260401c.XML, S620260401c_XML.xml)
     Standard: MMDDYYYY (TVD03302026.xml, CA03302026.xml, PL03312026.xml)
     TN:       MMDDYY   (TN_033126_TUESDAY.xml)
     """
-    # Try MMDDYYYY first (8 digits)
+    # Try YYYYMMDD first (Sony format: letter+digit prefix then 8 digits)
+    m = re.search(r'[A-Z]\d(\d{4})(\d{2})(\d{2})[a-zA-Z]', name, re.IGNORECASE)
+    if m:
+        try: return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        except: pass
+    # Try MMDDYYYY (8 digits)
     m = re.search(r'(\d{2})(\d{2})(\d{4})', name)
     if m:
         try: return datetime(int(m.group(3)), int(m.group(1)), int(m.group(2))).date()

@@ -261,6 +261,45 @@ if st.button(t('run'), type='primary', use_container_width=True):
 
     # ── DISPLAY WITH TABS ─────────────────────────────────────────────────────
     st.subheader(t('report'))
+
+    # Build per-Sony-channel report lines for tabs
+    # sony_pairings grouped by channel code
+    sony_by_code = {}
+    if sony_files_raw and selected_sony:
+        for pair in (pair_sony_files(sony_files_raw, lang) if 'sony_pairings' not in dir() else sony_pairings):
+            if pair['code'] not in selected_sony: continue
+            sony_by_code.setdefault(pair['code'], [])
+            # collect lines for this pairing
+            pairing_lines = []
+            sep60 = '═' * 60
+            markers_in_json = parse_sony_json_markers(pair['json_data']) if pair['json_data'] else []
+            if pair['json_data'] is None: pl_type = '— no JSON —'
+            elif markers_in_json: pl_type = 'FULL (marker present)'
+            else: pl_type = 'CURRENT (partial)'
+            pairing_lines += [sep60, f'CHANNEL: {pair["code"]} — {pair["channel_name"]}']
+            if pair['date']: pairing_lines.append(f'DATE: {pair["date"]}')
+            pairing_lines += [f'PLAYLIST TYPE: {pl_type}',
+                              f'JSON: {pair["json_file"].name if pair["json_file"] else "— not provided —"}',
+                              f'LOG:  {pair["xml_filename"] or "— not provided —"}', sep60]
+            if pair['json_data'] is None and pair['xml_file']:
+                pairing_lines.append('  ℹ  Log provided but no matching JSON found')
+            elif pair['json_data'] is not None and pair['xml_file'] is None:
+                pairing_lines.append('  ℹ  JSON found but no matching log provided')
+                try:
+                    r_lines, _ = check_sony(pair['json_data'], [], None, lang)
+                    pairing_lines += r_lines
+                except: pass
+            elif pair['json_data'] is not None and pair['xml_file'] is not None:
+                try:
+                    pair['xml_file'].seek(0)
+                    xml_rows_s = parse_sony_xml_log(pair['xml_file'])
+                    r_lines, _ = check_sony(pair['json_data'], xml_rows_s, pair['xml_filename'], lang)
+                    pairing_lines += r_lines
+                except Exception as e:
+                    pairing_lines.append(f'  ERROR: {e}')
+            pairing_lines.append('')
+            sony_by_code[pair['code']] += pairing_lines
+
     all_lines = header_lines[:]
     for d in sorted_dates:
         all_lines += day_reports.get(d, {}).get('all', [])
@@ -274,59 +313,69 @@ if st.button(t('run'), type='primary', use_container_width=True):
             warn_lines.append(f'  {ch_lbl} — {d_str}: {cnt} block{"s" if cnt>1 else ""} need manual review')
         st.error('\n'.join(warn_lines))
 
-    if len(sorted_dates) > 1:
-        tab_labels = [t('tab_all')] + [f'📅 {d}' for d in sorted_dates]
+    # Build tab structure: All + per-day (with channel sub-tabs) + per-Sony-channel
+    CH_DISPLAY2 = {**CH_DISPLAY, **{code: f'{code} {SONY_CHANNEL_MAP.get(code,code)}'
+                                     for code in sony_by_code}}
+
+    def _render_day_tab(date_str, key_prefix):
+        day_data   = day_reports.get(date_str, {})
+        ch_reports = day_data.get('channels', {})
+        day_text   = '\n'.join(header_lines + day_data.get('all', []))
+        if len(ch_reports) > 1:
+            ch_tab_labels = [CH_DISPLAY.get(ch, ch) for ch in ch_reports]
+            ch_tabs = st.tabs(ch_tab_labels)
+            for j, (ch, ch_lines) in enumerate(ch_reports.items()):
+                with ch_tabs[j]:
+                    ch_text = '\n'.join(header_lines + [f'DATE: {date_str}', '─'*60] + ch_lines)
+                    st.text(ch_text)
+                    st.download_button(t('dl'), ch_text,
+                                       file_name=f'report_{date_str}_{ch}_{datetime.now().strftime("%H%M%S")}.txt',
+                                       mime='text/plain', use_container_width=True,
+                                       key=f'dl_{key_prefix}_{date_str}_{ch}')
+        else:
+            st.text(day_text)
+        st.download_button(t('dl') + f' ({date_str})', day_text,
+                           file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
+                           mime='text/plain', use_container_width=True,
+                           key=f'dl_{key_prefix}_{date_str}_all')
+
+    # Decide tab layout
+    has_day_tabs  = len(sorted_dates) > 0
+    has_sony_tabs = bool(sony_by_code)
+    total_tabs    = (1 if (has_day_tabs or has_sony_tabs) else 0)  # "All" tab
+
+    if has_day_tabs or has_sony_tabs:
+        tab_labels = [t('tab_all')]
+        for d in sorted_dates: tab_labels.append(f'📅 {d}')
+        for code, ch_lines in sony_by_code.items():
+            tab_labels.append(f'📺 {code}')
+
         tabs = st.tabs(tab_labels)
 
+        # All tab
         with tabs[0]:
             st.text(full_text)
             st.download_button(t('dl'), full_text,
                                file_name=f'report_all_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                                mime='text/plain', use_container_width=True, key='dl_all')
 
+        # Day tabs
         for i, date_str in enumerate(sorted_dates):
             with tabs[i+1]:
-                day_data   = day_reports.get(date_str, {})
-                ch_reports = day_data.get('channels', {})
-                day_text   = '\n'.join(header_lines + day_data.get('all', []))
+                _render_day_tab(date_str, 'day')
 
-                if len(ch_reports) > 1:
-                    ch_tab_labels = [CH_DISPLAY.get(ch, ch) for ch in ch_reports]
-                    ch_tabs = st.tabs(ch_tab_labels)
-                    for j, (ch, ch_lines) in enumerate(ch_reports.items()):
-                        with ch_tabs[j]:
-                            ch_text = '\n'.join(header_lines + [f'DATE: {date_str}', '─'*60] + ch_lines)
-                            st.text(ch_text)
-                            st.download_button(t('dl'), ch_text,
-                                               file_name=f'report_{date_str}_{ch}_{datetime.now().strftime("%H%M%S")}.txt',
-                                               mime='text/plain', use_container_width=True,
-                                               key=f'dl_{date_str}_{ch}')
-                else:
-                    st.text(day_text)
-
-                st.download_button(t('dl') + f' ({date_str})', day_text,
-                                   file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
+        # Sony tabs
+        sony_tab_start = 1 + len(sorted_dates)
+        for i, (code, ch_lines) in enumerate(sony_by_code.items()):
+            with tabs[sony_tab_start + i]:
+                ch_text = '\n'.join(header_lines + ch_lines)
+                st.text(ch_text)
+                st.download_button(t('dl'), ch_text,
+                                   file_name=f'report_{code}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                                    mime='text/plain', use_container_width=True,
-                                   key=f'dl_{date_str}_all')
+                                   key=f'dl_sony_{code}')
     else:
-        # Single day — show channel tabs if multiple channels
-        day_data   = day_reports.get(sorted_dates[0], {}) if sorted_dates else {}
-        ch_reports = day_data.get('channels', {})
-
-        if len(ch_reports) > 1:
-            ch_tab_labels = [CH_DISPLAY.get(ch, ch) for ch in ch_reports]
-            ch_tabs = st.tabs(ch_tab_labels)
-            for j, (ch, ch_lines) in enumerate(ch_reports.items()):
-                with ch_tabs[j]:
-                    ch_text = '\n'.join(header_lines + ch_lines)
-                    st.text(ch_text)
-                    st.download_button(t('dl'), ch_text,
-                                       file_name=f'report_{sorted_dates[0]}_{ch}_{datetime.now().strftime("%H%M%S")}.txt',
-                                       mime='text/plain', use_container_width=True,
-                                       key=f'dl_single_{ch}')
-        else:
-            st.text(full_text)
-
+        st.text(full_text)
         st.download_button(t('dl'), full_text,
                            file_name=f'report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                            mime='text/plain', use_container_width=True, key='dl_single_all')
