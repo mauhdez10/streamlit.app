@@ -86,9 +86,20 @@ if uploaded:
         rows.append({'Date': '?', 'Channel': '?', 'Type': '?', 'File': uf.name})
     # Sony files
     for sf in sony_files_raw:
-        ch = SONY_CHANNEL_MAP.get(sf['code'], sf['code'])
-        rows.append({'Date': '(Sony)', 'Channel': ch,
-                     'Type': sf['ftype'].upper(), 'File': sf['file'].name})
+        ch_name = SONY_CHANNEL_MAP.get(sf['code'], sf['code'])
+        ch_display = f'{sf["code"]} {ch_name}'
+        # Extract date from XML filename or JSON content
+        from checker import _date_from_xml_filename, _date_from_json_content, extract_sony_version
+        if sf['ftype'] == 'xml':
+            d = _date_from_xml_filename(sf['file'].name)
+            type_label = f'Log {d.strftime("%m/%d") if d else "?"}'
+        else:
+            d = _date_from_json_content(sf['file'])
+            try: sf['file'].seek(0)
+            except: pass
+            type_label = f'Playlist {d.strftime("%m/%d") if d else "?"}'
+        rows.append({'Date': str(d) if d else '?', 'Channel': ch_display,
+                     'Type': type_label, 'File': sf['file'].name})
     if rows:
         import pandas as pd
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
@@ -97,15 +108,23 @@ if uploaded:
     st.divider()
 
 # ── CHANNEL SELECTOR ──────────────────────────────────────────────────────────
+# Build channel list including Sony codes
 available = sorted(set(ch for (_, ch) in days.keys()) | set(grillas.keys()))
-has_sony = bool(sony_files_raw)
-if available:
-    selected = st.multiselect(
-        t('channels'), options=available, default=available,
-        format_func=lambda x: {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}.get(x,x)
+sony_codes_present = sorted(set(sf['code'] for sf in sony_files_raw))
+all_options = available + sony_codes_present
+CH_FORMAT = {'catv':'CATV','tvd':'TVD','latam':'Pasiones Latam',
+             'us':'Pasiones US','tn':'Fast Todonovelas'}
+CH_FORMAT.update({code: f'{code} {SONY_CHANNEL_MAP.get(code,code)}' for code in sony_codes_present})
+
+if all_options:
+    selected_all = st.multiselect(
+        t('channels'), options=all_options, default=all_options,
+        format_func=lambda x: CH_FORMAT.get(x, x)
     )
 else:
-    selected = []
+    selected_all = []
+selected        = [x for x in selected_all if x in available]
+selected_sony   = [x for x in selected_all if x in sony_codes_present]
 
 # ── RUN ───────────────────────────────────────────────────────────────────────
 if st.button(t('run'), type='primary', use_container_width=True):
@@ -195,14 +214,27 @@ if st.button(t('run'), type='primary', use_container_width=True):
 
     # ── SONY / AXN PROCESSING ─────────────────────────────────────────────────
     sony_report_lines = []
-    if sony_files_raw:
+    if sony_files_raw and selected_sony:
+        from checker import parse_sony_json_markers as _psm
         sony_pairings = pair_sony_files(sony_files_raw, lang)
         sep60 = '═' * 60
         for pair in sony_pairings:
+            # Filter by selected channels
+            if pair['code'] not in selected_sony:
+                continue
+            # Determine playlist type for header
+            markers_in_json = _psm(pair['json_data']) if pair['json_data'] else []
+            if pair['json_data'] is None:
+                pl_type = '— no JSON —'
+            elif markers_in_json:
+                pl_type = 'FULL (marker present)'
+            else:
+                pl_type = 'CURRENT (partial)'
             sony_report_lines.append(sep60)
-            sony_report_lines.append(f'CHANNEL: {pair["channel_name"]}')
+            sony_report_lines.append(f'CHANNEL: {pair["code"]} — {pair["channel_name"]}')
             if pair['date']:
                 sony_report_lines.append(f'DATE: {pair["date"]}')
+            sony_report_lines.append(f'PLAYLIST TYPE: {pl_type}')
             sony_report_lines.append(f'JSON: {pair["json_file"].name if pair["json_file"] else "— not provided —"}')
             sony_report_lines.append(f'LOG:  {pair["xml_filename"] or "— not provided —"}')
             sony_report_lines.append(sep60)

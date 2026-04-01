@@ -667,8 +667,9 @@ def pair_sony_files(sony_files, lang='en'):
         json_info.append({'jf': jf, 'data': data,
                           'markers': markers, 'date': date_val})
 
-    # Match by marker log_base vs xml filename (same channel code)
-    for jinfo in json_info:
+    # Match full JSONs (with markers) first, then partial (date-based) to avoid consuming wrong XML
+    json_info_sorted = sorted(json_info, key=lambda x: 0 if x['markers'] else 1)
+    for jinfo in json_info_sorted:
         jf       = jinfo['jf']
         code     = jf['code']
         ch_name  = SONY_CHANNEL_MAP.get(code, code)
@@ -1210,11 +1211,17 @@ def extract_sony_version(filename):
 def extract_sony_xml_base(filename):
     """Normalise XML filename to base form for marker comparison.
     S620260401c_XML.xml -> S620260401c.XML
+    S620260401c.XML.xml -> S620260401c.XML  (Windows double extension)
     S620260401c.XML     -> S620260401c.XML
     """
-    base = re.sub(r'_XML\.xml$', '.XML', filename, flags=re.IGNORECASE)
+    base = filename.strip()
+    # Handle .XML.xml (Windows double extension)
+    base = re.sub(r'\.XML\.xml$', '.XML', base, flags=re.IGNORECASE)
+    # Handle _XML.xml
+    base = re.sub(r'_XML\.xml$', '.XML', base, flags=re.IGNORECASE)
+    # Handle plain .xml
     base = re.sub(r'\.xml$', '.XML', base, flags=re.IGNORECASE)
-    return base.strip()
+    return base
 
 
 def parse_sony_xml_log(filepath_or_bytes):
