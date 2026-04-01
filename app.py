@@ -9,11 +9,74 @@ sys.path.insert(0, os.path.dirname(__file__))
 from checker import (
     parse_json_playlist, parse_xml_log, parse_xml_log_tn, parse_grilla,
     generate_report, check_promo_repeats, detect_files,
-    parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP,
+    parse_sony_xml_log as _checker_parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP,
     parse_sony_json_markers
 )
 
+# ---------------------------------------------------------------------------
+# Override the Sony XML parser to be more robust.  The upstream parser only
+# recognises logs in the exact row/column format.  Some regions provide logs
+# with different capitalisation or column labels, resulting in an empty result set.
+# This wrapper first calls the original parser.  If it returns no rows it
+# falls back to the Todonovelas parser and adapts its output to the structure
+# expected by `check_sony`.  If both attempts fail, it returns an empty list.
+def parse_sony_xml_log(file_or_bytes):
+    try:
+        if hasattr(file_or_bytes, 'seek'):
+            file_or_bytes.seek(0)
+    except Exception:
+        pass
+    rows = []
+    try:
+        rows = _checker_parse_sony_xml_log(file_or_bytes)
+    except Exception:
+        rows = []
+    if not rows:
+        try:
+            if hasattr(file_or_bytes, 'seek'):
+                file_or_bytes.seek(0)
+            tn_rows = parse_xml_log_tn(file_or_bytes)
+            adapted = []
+            from datetime import datetime as _dt
+            for r in tn_rows:
+                try:
+                    dt = _dt.strptime(r.get('startat', '')[:19], '%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    dt = None
+                dur_parts = r.get('duration', '').split(':')
+                try:
+                    h, m_, s = int(dur_parts[0]), int(dur_parts[1]), int(dur_parts[2])
+                    dur_secs = h*3600 + m_*60 + s
+                except Exception:
+                    dur_secs = 0
+                adapted.append({
+                    'mediaid': r.get('mediaid', ''),
+                    'local_dt': dt,
+                    'duration_secs': dur_secs,
+                    'title': r.get('name', ''),
+                    'type': r.get('contenttype', '').upper(),
+                })
+            rows = adapted
+        except Exception:
+            rows = []
+    return rows
+
 st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
+
+# Custom CSS to ensure the main container uses the full page width. Without
+# this the app can render in a narrow centred column on some installations.
+st.markdown(
+    """
+    <style>
+    .stApp {
+        max-width: none;
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 SONY_EMOJI = {
     'A1':'🅰️','A2':'🅰️','A3':'🅰️','A4':'🅰️','A5':'🅰️','A6':'🅰️',
@@ -42,7 +105,8 @@ L = {
     'title':    {'en': '📋 Broadcast Playlist Checker',             'es': '📋 Verificador de Playlist'},
     'upload':   {'en': 'Drop all files here — auto-detected (JSON, XML, XLSX)', 'es': 'Arrastra archivos aquí — detección automática (JSON, XML, XLSX)'},
     'run':      {'en': '▶  Run Check',                              'es': '▶  Verificar'},
-    'dl':       {'en': '⬇ Download Report (.txt)',                  'es': '⬇ Descargar Reporte (.txt)'},
+    # Updated label for per‑channel/per‑date report download buttons.
+    'dl':       {'en': '⬇ Current Report (.txt)',                  'es': '⬇ Reporte Actual (.txt)'},
     'detected': {'en': '**Detected files:**',                       'es': '**Archivos detectados:**'},
     'unknown':  {'en': '⚠ Unrecognized:',                          'es': '⚠ No reconocidos:'},
     'hint':     {'en': 'JSON → promo check  |  +XML → commercial check  |  +Grilla → program check',
@@ -54,6 +118,30 @@ L = {
     'running':  {'en': 'Running checks...',                         'es': 'Verificando...'},
 }
 def t(k): return L[k][lang]
+
+# Helper to translate Sony/AXN report lines into the selected language.  It replaces
+# the hard‑coded English headings and messages with the corresponding entries
+# from the SONY_L dictionary based on the current language.  Lines that do not
+# match any of the known patterns are returned unchanged.
+def _translate_sony_lines(lines, lang):
+    translated = []
+    for line in lines:
+        line_stripped = line.strip()
+        if line_stripped.startswith('── [1]'):
+            translated.append(SL('markers_hdr', lang))
+        elif line_stripped.startswith('── [2]'):
+            translated.append(SL('log_hdr', lang))
+        elif line_stripped.startswith('── [3]'):
+            translated.append(SL('ep_hdr', lang))
+        elif line_stripped.startswith('── [4]'):
+            translated.append(SL('seg_hdr', lang))
+        elif line_stripped.startswith('! No XML log provided'):
+            translated.append(SL('no_log', lang))
+        elif line_stripped.startswith('ℹ  No markers found') or line_stripped.startswith('ℹ No markers found'):
+            translated.append(SL('no_marker', lang))
+        else:
+            translated.append(line)
+    return translated
 
 st.title(t('title'))
 
@@ -259,20 +347,26 @@ if st.button(t('run'), type='primary', use_container_width=True):
                               sep60]
 
             if pair['json_data'] is None and pair['xml_file']:
+                # XML only, no JSON file
                 pairing_lines.append(SL('no_json', lang))
             elif pair['json_data'] is not None and pair['xml_file'] is None:
+                # JSON only, no XML file; run the checker with an empty log and translate the output
                 pairing_lines.append(SL('no_log', lang))
                 try:
                     r_lines, _ = check_sony(pair['json_data'], [], None, lang)
-                    pairing_lines += r_lines
-                except: pass
+                    pairing_lines += _translate_sony_lines(r_lines, lang)
+                except Exception:
+                    pass
             elif pair['json_data'] is not None and pair['xml_file'] is not None:
                 try:
                     pair['xml_file'].seek(0)
                     xml_rows_sony = parse_sony_xml_log(pair['xml_file'])
-                    r_lines, _ = check_sony(pair['json_data'], xml_rows_sony,
-                                            pair['xml_filename'], lang)
-                    pairing_lines += r_lines
+                    if not xml_rows_sony:
+                        pairing_lines.append('  ! XML log found but could not parse any entries')
+                    else:
+                        r_lines, _ = check_sony(pair['json_data'], xml_rows_sony,
+                                                pair['xml_filename'], lang)
+                        pairing_lines += _translate_sony_lines(r_lines, lang)
                 except Exception as e:
                     pairing_lines.append(f'  ERROR: {e}')
             pairing_lines.append('')
@@ -333,7 +427,8 @@ if st.button(t('run'), type='primary', use_container_width=True):
                                        key=f'dl_{key_prefix}_{date_str}_{ch}')
         else:
             st.text(day_text)
-        dl_day_lbl = f'⬇ {"Current" if lang=="en" else "Actual"} {date_str} (.txt)'
+        # Use a simple "Current Report" label without the date for the day download
+        dl_day_lbl = '⬇ Current Report (.txt)' if lang=='en' else '⬇ Reporte Actual (.txt)'
         st.download_button(dl_day_lbl, day_text,
                            file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
                            mime='text/plain', use_container_width=True,
