@@ -596,7 +596,7 @@ def detect_files(uploaded_files):
             elif 'TVD' in name_up:                      channel = 'tvd'
             elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up: channel = 'latam'
             elif 'PASIONES_US' in name_up or 'PASIONES US' in name_up:       channel = 'us'
-            elif 'FAST_TODONOVELAS' in name_up or 'FAST TODONOVELAS' in name_up or 'TODO_NOVELAS' in name_up: channel = 'tn'
+            elif 'FAST_TODONOVELAS' in name_up or 'FAST TODONOVELAS' in name_up or ('TODO' in name_up and 'NOVELA' in name_up): channel = 'tn'
             else: unknown.append(f); continue
 
         if ftype == 'grilla':
@@ -693,20 +693,22 @@ def check_commercials_vs_xml(playlist, xml_rows, current_start, lang):
     # --- Build JSON break list (only those with a raw anchor) ---
     json_breaks = [b for b in playlist['breaks'] if b.get('after_program_raw')]
 
-    # --- For partial: find starting position using externalid anchor ---
+    # --- For partial: align by matching first JSON break's segment in XML ---
     if current_start:
-        anchor_row_idx = find_xml_anchor_by_extid(playlist['events'], xml_rows)
-        anchor_mediaid = xml_rows[anchor_row_idx]['mediaid'] if anchor_row_idx < len(xml_rows) else None
+        # Filter json_breaks to those at/after current_start
+        def _break_time(b):
+            return next((i['start'] for i in b.get('items',[]) if i.get('start')), None)
+        json_breaks = [b for b in json_breaks
+                       if not _break_time(b) or _break_time(b) >= current_start]
 
-        if anchor_mediaid:
-            # Skip XML breaks up to and including the anchor segment
-            xi_start = next((i+1 for i, xb in enumerate(xml_breaks)
-                             if xb['anchor_id'] == anchor_mediaid), 0)
-            xml_breaks = xml_breaks[xi_start:]
-            # Skip JSON breaks up to and including the anchor segment
-            ji_start = next((i+1 for i, jb in enumerate(json_breaks)
-                             if jb.get('after_program_raw') == anchor_mediaid), 0)
-            json_breaks = json_breaks[ji_start:]
+        if json_breaks:
+            first_seg = json_breaks[0].get('after_program_raw', '')
+            if first_seg:
+                # Find this segment in XML breaks and start from there
+                xi = next((i for i, xb in enumerate(xml_breaks)
+                           if xb['anchor_id'] == first_seg), None)
+                if xi is not None:
+                    xml_breaks = xml_breaks[xi:]  # start FROM this segment (not after)
 
     # --- Labels ---
     added_lbl    = {'en': 'added to playlist',    'es': 'agregado a playlist'}
@@ -1031,6 +1033,9 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
     manual_warns = []
     if not xml_rows:
         lines.append(T('no_xml', lang))
+    elif is_tn:
+        # TN has no commercials — simple count only, no break-by-break needed
+        lines.append(f'  {T("ok_commercials", lang, n=total_comms)}')
     else:
         comm_lines, manual_warns = check_commercials_vs_xml(playlist, xml_rows, current_start, lang)
         lines += comm_lines
