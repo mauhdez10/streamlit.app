@@ -439,9 +439,16 @@ def _parse_grilla_pasiones(filepath_or_bytes, target_date):
     if target_ws is None or target_col is None:
         return []
 
-    # Episode ID rows have ET column (col 1) = None, show name rows have a time value.
-    # This reliably catches IDs with any digit count (LATUV49, UMM14, etc.)
-    ET_COL = 1
+    # Detect which column is ET — show name rows have a time value there,
+    # episode ID rows have None. Works for both ET-at-col-0 and UTC+ET formats.
+    # Look for 'ET' or 'E.T.' in header row to find the column.
+    header_row = all_rows[1] if len(all_rows) > 1 else []
+    ET_COL = 0  # default
+    for ci, cell in enumerate(header_row):
+        if cell and isinstance(cell, str) and cell.strip().upper() in ('ET', 'E.T.'):
+            ET_COL = ci
+            break
+
     episode_ids = []
     for row in all_rows[2:]:
         et_val = row[ET_COL] if ET_COL < len(row) else 'x'
@@ -573,6 +580,7 @@ def detect_files(uploaded_files):
     days    = {}
     grillas = {}
     unknown = []
+    sony_files = []   # Sony/AXN files handled separately
 
     for f in uploaded_files:
         name_up = f.name.upper()
@@ -582,6 +590,12 @@ def detect_files(uploaded_files):
         elif ext == 'xml':           ftype = 'xml'
         elif ext in ('xlsx','xlsm'): ftype = 'grilla'
         else: unknown.append(f); continue
+
+        # Sony/AXN detection — check before generic channel detection
+        sony_code = extract_sony_code(f.name)
+        if sony_code:
+            sony_files.append({'file': f, 'ftype': ftype, 'code': sony_code})
+            continue
 
         # Channel detection
         if ext == 'xml':
@@ -619,7 +633,98 @@ def detect_files(uploaded_files):
         if ftype == 'json':  days[key]['json'].append(f)
         elif ftype == 'xml': days[key]['xml'] = f
 
-    return days, grillas, unknown
+    return days, grillas, unknown, sony_files
+
+
+def pair_sony_files(sony_files, lang='en'):
+    """
+    Pair Sony JSON files with Sony XML log files by channel code + date/marker.
+    Returns list of pairing dicts for the app to process.
+    Each: {'label', 'code', 'channel_name', 'json_file', 'xml_file', 'xml_filename', 'date'}
+    Plus unmatched XMLs and JSONs.
+    """
+    json_list = [f for f in sony_files if f['ftype'] == 'json']
+    xml_list  = [f for f in sony_files if f['ftype'] == 'xml']
+
+    pairings    = []
+    used_xmls   = set()
+    used_jsons  = set()
+
+    # For each JSON: read markers to find expected XML(s)
+    # Also extract date from JSON content for fallback
+    json_info = []
+    for jf in json_list:
+        try:
+            jf['file'].seek(0)
+            data = json.load(jf['file'])
+            jf['file'].seek(0)
+        except:
+            data = {'events': []}
+        markers  = parse_sony_json_markers(data)
+        date_val = _date_from_json_content(jf['file'])
+        try: jf['file'].seek(0)
+        except: pass
+        json_info.append({'jf': jf, 'data': data,
+                          'markers': markers, 'date': date_val})
+
+    # Match by marker log_base vs xml filename (same channel code)
+    for jinfo in json_info:
+        jf       = jinfo['jf']
+        code     = jf['code']
+        ch_name  = SONY_CHANNEL_MAP.get(code, code)
+        matched_xml = None
+
+        if jinfo['markers']:
+            for mk in jinfo['markers']:
+                if not mk['log_base']: continue
+                for xf in xml_list:
+                    if xf['code'] != code: continue
+                    xbase = extract_sony_xml_base(xf['file'].name)
+                    if xbase.upper() == mk['log_base'].upper() and id(xf) not in used_xmls:
+                        matched_xml = xf
+                        used_xmls.add(id(xf))
+                        break
+                if matched_xml: break
+
+        # Fallback: match by channel code + date from filename
+        if not matched_xml and jinfo['date']:
+            date_str = jinfo['date'].strftime('%Y%m%d')
+            for xf in xml_list:
+                if xf['code'] != code: continue
+                if date_str in xf['file'].name and id(xf) not in used_xmls:
+                    matched_xml = xf
+                    used_xmls.add(id(xf))
+                    break
+
+        used_jsons.add(id(jf))
+        pairings.append({
+            'label':        f'{ch_name} — {jinfo["date"] or "?"}',
+            'code':         code,
+            'channel_name': ch_name,
+            'json_file':    jf['file'],
+            'json_data':    jinfo['data'],
+            'xml_file':     matched_xml['file'] if matched_xml else None,
+            'xml_filename': matched_xml['file'].name if matched_xml else None,
+            'date':         jinfo['date'],
+        })
+
+    # Unmatched XMLs (no JSON for them)
+    unmatched_xml = [xf for xf in xml_list if id(xf) not in used_xmls]
+    for xf in unmatched_xml:
+        code    = xf['code']
+        ch_name = SONY_CHANNEL_MAP.get(code, code)
+        pairings.append({
+            'label':        f'{ch_name} — LOG ONLY (no JSON)',
+            'code':         code,
+            'channel_name': ch_name,
+            'json_file':    None,
+            'json_data':    None,
+            'xml_file':     xf['file'],
+            'xml_filename': xf['file'].name,
+            'date':         None,
+        })
+
+    return pairings
 
 
 # ── CHECKS ────────────────────────────────────────────────────────────────────
@@ -1047,8 +1152,11 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
     lines.append('')
 
     lines.append(f'── [4] {T("section_ingested",lang)} ──')
-    ni = check_not_ingested(playlist, current_start, lang)
-    lines += ni if ni else [f'  {T("ok_ingested",lang)}']
+    if is_tn:
+        lines.append(f'  ℹ  Not applicable for this channel')
+    else:
+        ni = check_not_ingested(playlist, current_start, lang)
+        lines += ni if ni else [f'  {T("ok_ingested",lang)}']
     lines.append('')
 
     if not is_tn:
@@ -1063,3 +1171,287 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
 
     lines.append(sep)
     return '\n'.join(lines), manual_warns
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SONY / AXN CHANNEL LOGIC
+# ══════════════════════════════════════════════════════════════════════════════
+
+SONY_CHANNEL_MAP = {
+    'A1':'AXN ARGENTINA LAT','A2':'AXN MEXICO LAT','A3':'AXN ANDES LAT',
+    'A4':'AXN BRASIL','A5':'AXN VENEZUELA LAT','A6':'AXN CENTRO AMERICA LAT',
+    'F1':'SONY MOVIE LATAM','F4':'SONY MOVIE BRASIL',
+    'S1':'SONY ARGENTINA LAT','S2':'SONY MEXICO LAT','S3':'SONY ANDES LAT',
+    'S4':'SONY BRASIL','S5':'SONY VENEZUELA LAT','S6':'SONY CENTRO AMERICA LAT',
+}
+SONY_CODES = set(SONY_CHANNEL_MAP.keys())
+
+
+def extract_sony_code(filename):
+    """Extract 2-char Sony/AXN channel code from filename."""
+    name = filename.upper()
+    # JSON: vipeSchedule_S6_... or vipeSchedule_S6SET...
+    m = re.search(r'VIPESCHEDULE_([A-Z][0-9])[\W_]', name)
+    if m and m.group(1) in SONY_CODES:
+        return m.group(1)
+    # XML: S620260401c.xml or S620260401c_XML.xml
+    m = re.match(r'^([A-Z][0-9])(\d{8})[A-Za-z]', filename.strip())
+    if m and m.group(1).upper() in SONY_CODES:
+        return m.group(1).upper()
+    return None
+
+
+def extract_sony_version(filename):
+    """Extract version letter (a-z) from Sony XML filename like S620260401c.XML"""
+    m = re.search(r'\d{8}([a-zA-Z])(?:_XML|\.)', filename, re.IGNORECASE)
+    return m.group(1).lower() if m else None
+
+
+def extract_sony_xml_base(filename):
+    """Normalise XML filename to base form for marker comparison.
+    S620260401c_XML.xml -> S620260401c.XML
+    S620260401c.XML     -> S620260401c.XML
+    """
+    base = re.sub(r'_XML\.xml$', '.XML', filename, flags=re.IGNORECASE)
+    base = re.sub(r'\.xml$', '.XML', base, flags=re.IGNORECASE)
+    return base.strip()
+
+
+def parse_sony_xml_log(filepath_or_bytes):
+    """Parse Sony/AXN XML log (tabledata format, same as TN).
+    Returns list of dicts: mediaid, local_time (datetime), duration_secs, title, type.
+    """
+    try:
+        if hasattr(filepath_or_bytes, 'read'): content = filepath_or_bytes.read()
+        elif isinstance(filepath_or_bytes, bytes): content = filepath_or_bytes
+        else:
+            with open(filepath_or_bytes, 'rb') as f: content = f.read()
+        root = ET.fromstring(content)
+        rows = []
+        for row in root.findall('.//row'):
+            typ   = row.findtext('column-5','').strip().upper()
+            mid   = row.findtext('column-4','').strip()
+            lt    = row.findtext('column-1','').strip()
+            dur   = row.findtext('column-3','').strip().split(';')[0]
+            title = row.findtext('column-6','').strip()
+            try:
+                dt = datetime.strptime(lt, '%Y-%m-%d %H:%M:%S')
+            except:
+                dt = None
+            try:
+                h,m_,s = dur.split(':')
+                dur_secs = int(h)*3600 + int(m_)*60 + int(s)
+            except:
+                dur_secs = 0
+            rows.append({'mediaid': mid, 'local_dt': dt,
+                         'duration_secs': dur_secs, 'title': title, 'type': typ})
+        return rows
+    except:
+        return []
+
+
+def parse_sony_json_markers(data):
+    """Extract all markers from a Sony JSON.
+    Returns list of {'marker_name', 'log_base', 'version', 'start_dt', 'index'}
+    """
+    markers = []
+    for i, ev in enumerate(data.get('events', [])):
+        for a in ev.get('assets', []):
+            if a.get('type') == 'marker':
+                name  = ev.get('name', '')
+                start = ev.get('startTime', '')[:19]
+                # Extract log filename from marker name
+                # "Playlist start, S620260401c.XML (1).xml"
+                m = re.search(r'([A-Z][0-9]\d{8}[a-z]\.XML)', name, re.IGNORECASE)
+                log_base = m.group(1).upper() if m else None
+                version  = extract_sony_version(log_base) if log_base else None
+                try:
+                    start_dt = datetime.strptime(start, '%Y-%m-%d %H:%M:%S')
+                except:
+                    start_dt = None
+                markers.append({'name': name, 'log_base': log_base,
+                                 'version': version, 'start_dt': start_dt,
+                                 'event_index': i})
+    return markers
+
+
+def check_sony(json_data, xml_rows, xml_filename, lang='en'):
+    """
+    Sony/AXN broadcast check:
+    1. Marker list
+    2. Marker vs log filename / version match
+    3. Endpoint check (marker start ≈ log start, or JSON end ≈ log end for partial)
+    4. Segment timing: all PROGRAM segments match within 5 seconds
+    Returns (report_lines, has_errors)
+    """
+    sep   = '─' * 50
+    lines = []
+    has_errors = False
+
+    events = json_data.get('events', [])
+    xml_base = extract_sony_xml_base(xml_filename) if xml_filename else None
+    xml_version = extract_sony_version(xml_filename) if xml_filename else None
+
+    # Detect playlist type
+    markers = parse_sony_json_markers(json_data)
+    is_partial = (len(markers) == 0)
+
+    # ── Marker list ──
+    lines.append('── [1] MARKERS ──')
+    if not markers:
+        lines.append('  ℹ  No markers found (partial/current playlist)')
+    else:
+        for mk in markers:
+            lines.append(f'  📌 {mk["name"]}')
+            lines.append(f'     Expected log: {mk["log_base"] or "?"} | Version: {mk["version"] or "?"} | Start: {fmt_t(mk["start_dt"]) if mk["start_dt"] else "?"}')
+    lines.append('')
+
+    # ── Version / filename match ──
+    lines.append('── [2] LOG FILE MATCH ──')
+    if not xml_rows:
+        lines.append('  ! No XML log provided')
+    elif not markers and not is_partial:
+        lines.append('  ! Cannot verify — no markers in JSON')
+    else:
+        lines.append(f'  Log file: {xml_filename or "?"}')
+        if markers:
+            mk = markers[0]
+            if mk['log_base'] and xml_base:
+                if mk['log_base'].upper() == xml_base.upper():
+                    lines.append(f'  ✓ Filename matches marker: {mk["log_base"]}')
+                else:
+                    lines.append(f'  ✗ FILENAME MISMATCH: Marker expects {mk["log_base"]} | Got {xml_base}')
+                    has_errors = True
+            if mk['version'] and xml_version:
+                if mk['version'] == xml_version:
+                    lines.append(f'  ✓ Version matches: {mk["version"].upper()}')
+                else:
+                    lines.append(f'  ✗ VERSION MISMATCH: Marker says {mk["version"].upper()} | Log is {xml_version.upper()}')
+                    has_errors = True
+        elif is_partial:
+            lines.append(f'  ℹ  Partial playlist — no marker to verify filename against')
+    lines.append('')
+
+    # ── Endpoint check ──
+    lines.append('── [3] ENDPOINT CHECK ──')
+    if not xml_rows:
+        lines.append('  ! No XML log provided')
+    else:
+        xml_progs = [r for r in xml_rows if r['type'] == 'PROGRAM']
+        # Log start and end
+        log_start_dt = next((r['local_dt'] for r in xml_rows if r['local_dt']), None)
+        last_row = xml_rows[-1]
+        if last_row['local_dt']:
+            log_end_dt = last_row['local_dt'] + timedelta(seconds=last_row['duration_secs'])
+        else:
+            log_end_dt = None
+
+        if log_start_dt:
+            lines.append(f'  Log start: {fmt_t(log_start_dt)}')
+        if log_end_dt:
+            lines.append(f'  Log end:   {fmt_t(log_end_dt)}')
+
+        if markers and log_start_dt:
+            mk = markers[0]
+            if mk['start_dt']:
+                diff = abs((mk['start_dt'] - log_start_dt).total_seconds())
+                if diff <= 5:
+                    lines.append(f'  ✓ Marker start matches log start (diff={diff:.1f}s)')
+                else:
+                    lines.append(f'  ✗ ENDPOINT MISMATCH: Marker start={fmt_t(mk["start_dt"])} | Log start={fmt_t(log_start_dt)} | diff={diff:.1f}s')
+                    has_errors = True
+        elif is_partial and log_end_dt:
+            # For partial: JSON end ≈ log end
+            # Find JSON last program end time
+            json_end_dt = None
+            for ev in reversed(events):
+                for a in ev.get('assets', []):
+                    if a.get('type') == 'Program':
+                        st  = ev.get('startTime', '')[:19]
+                        dur = ev.get('duration', '').split(';')[0].split('@')[0]
+                        try:
+                            sdt = datetime.strptime(st, '%Y-%m-%d %H:%M:%S')
+                            h,m_,s = dur.split(':')
+                            json_end_dt = sdt + timedelta(hours=int(h), minutes=int(m_), seconds=int(s))
+                        except:
+                            pass
+                        break
+                if json_end_dt: break
+
+            if json_end_dt:
+                diff = abs((json_end_dt - log_end_dt).total_seconds())
+                if diff <= 5:
+                    lines.append(f'  ✓ JSON end matches log end (JSON end={fmt_t(json_end_dt)} | Log end={fmt_t(log_end_dt)} | diff={diff:.1f}s)')
+                else:
+                    lines.append(f'  ✗ ENDPOINT MISMATCH: JSON ends {fmt_t(json_end_dt)} | Log ends {fmt_t(log_end_dt)} | diff={diff:.1f}s')
+                    has_errors = True
+    lines.append('')
+
+    # ── Segment timing check ──
+    lines.append('── [4] SEGMENT TIMING CHECK (≤5s tolerance) ──')
+    if not xml_rows:
+        lines.append('  ! No XML log provided')
+    else:
+        xml_progs = [r for r in xml_rows if r['type'] == 'PROGRAM']
+        xml_lookup = {}
+        for r in xml_progs:
+            xml_lookup.setdefault(r['mediaid'], []).append(r['local_dt'])
+
+        json_segs = []
+        for ev in events:
+            for a in ev.get('assets', []):
+                if a.get('type') == 'Program':
+                    st  = ev.get('startTime', '')[:19]
+                    ref = a.get('reference', '')
+                    try:
+                        dt = datetime.strptime(st, '%Y-%m-%d %H:%M:%S')
+                    except:
+                        dt = None
+                    json_segs.append({'ref': ref, 'dt': dt,
+                                      'name': ev.get('name', '')[:40]})
+
+        matched, mismatched, not_found = [], [], []
+        for seg in json_segs:
+            if not seg['dt']:
+                not_found.append(seg); continue
+            candidates = xml_lookup.get(seg['ref'], [])
+            best_diff = 999
+            best_xdt  = None
+            for xdt in candidates:
+                if xdt is None: continue
+                d = abs((seg['dt'] - xdt).total_seconds())
+                if d < best_diff:
+                    best_diff = d
+                    best_xdt  = xdt
+            if best_xdt is not None and best_diff <= 5:
+                matched.append({**seg, 'xml_dt': best_xdt, 'diff': best_diff})
+            elif best_xdt is not None:
+                mismatched.append({**seg, 'xml_dt': best_xdt, 'diff': best_diff})
+            else:
+                not_found.append(seg)
+
+        total = len(json_segs)
+        lines.append(f'  Total segments: {total} | Matched: {len(matched)} | Mismatched: {len(mismatched)} | Not found: {len(not_found)}')
+
+        if mismatched:
+            has_errors = True
+            for ms in mismatched[:10]:
+                lines.append(f'  ✗ MISMATCH: {ms["ref"]} | JSON={fmt_t(ms["dt"])} | XML={fmt_t(ms["xml_dt"])} | diff={ms["diff"]:.1f}s')
+        if not_found:
+            has_errors = True
+            for nf in not_found[:5]:
+                lines.append(f'  ✗ NOT IN LOG: {nf["ref"]} @ {fmt_t(nf["dt"])} | {nf["name"]}')
+
+        if not mismatched and not not_found and matched:
+            # Show 3 spread examples
+            spread = sorted(matched, key=lambda x: x['dt'])
+            examples = [spread[0], spread[len(spread)//2], spread[-1]]
+            lines.append(f'  ✓ All {len(matched)} segments match within 5 seconds')
+            lines.append(f'  Examples (early / mid / late):')
+            log_start = spread[0]['xml_dt']
+            for ex in examples:
+                hrs = (ex['dt'] - log_start).total_seconds() / 3600
+                lines.append(f'    {ex["ref"]} @ {fmt_t(ex["dt"])} — diff={ex["diff"]:.1f}s — {hrs:.1f}h into broadcast')
+    lines.append('')
+
+    return lines, has_errors
