@@ -24,13 +24,33 @@ SONY_L = {
     'markers_hdr':  {'en': '── [1] MARKERS ──',                    'es': '── [1] MARCADORES ──'},
     'no_marker':    {'en': '  ℹ  No markers found (partial/current playlist)', 'es': '  ℹ  Sin marcadores (playlist parcial/actual)'},
     'log_hdr':      {'en': '── [2] LOG FILE MATCH ──',             'es': '── [2] VERIFICACIÓN DE ARCHIVO LOG ──'},
+    'no_xml_log':   {'en': '  ! No XML log provided',              'es': '  ! Log XML no proporcionado'},
+    'log_file':     {'en': '  Log file: {0}',                      'es': '  Archivo log: {0}'},
+    'filename_match': {'en': '  ✓ Filename matches marker: {0}',  'es': '  ✓ Nombre de archivo coincide con marcador: {0}'},
+    'filename_mismatch': {'en': '  ✗ FILENAME MISMATCH: Marker expects {0} | Got {1}', 'es': '  ✗ DESAJUSTE DE NOMBRE: Marcador espera {0} | Obtuvo {1}'},
+    'version_match': {'en': '  ✓ Version matches: {0}',            'es': '  ✓ Versión coincide: {0}'},
+    'version_mismatch': {'en': '  ✗ VERSION MISMATCH: Marker says {0} | Log is {1}', 'es': '  ✗ DESAJUSTE DE VERSIÓN: Marcador dice {0} | Log es {1}'},
+    'partial_no_marker': {'en': '  ℹ  Partial playlist — no marker to verify filename against', 'es': '  ℹ  Playlist parcial — sin marcador para verificar nombre de archivo'},
     'ep_hdr':       {'en': '── [3] ENDPOINT CHECK ──',             'es': '── [3] VERIFICACIÓN DE PUNTO FINAL ──'},
+    'log_start':    {'en': '  Log start: {0}',                     'es': '  Inicio del log: {0}'},
+    'log_end':      {'en': '  Log end:   {0}',                     'es': '  Fin del log:   {0}'},
+    'marker_start_match': {'en': '  ✓ Marker start matches log start (diff={0:.1f}s)', 'es': '  ✓ Inicio del marcador coincide con inicio del log (diff={0:.1f}s)'},
+    'endpoint_mismatch_marker': {'en': '  ✗ ENDPOINT MISMATCH: Marker start={0} | Log start={1} | diff={2:.1f}s', 'es': '  ✗ DESAJUSTE DE PUNTO FINAL: Inicio marcador={0} | Inicio log={1} | diff={2:.1f}s'},
+    'json_end_match': {'en': '  ✓ JSON end matches log end (JSON end={0} | Log end={1} | diff={2:.1f}s)', 'es': '  ✓ Fin JSON coincide con fin log (Fin JSON={0} | Fin log={1} | diff={2:.1f}s)'},
+    'endpoint_mismatch_json': {'en': '  ✗ ENDPOINT MISMATCH: JSON ends {0} | Log ends {1} | diff={2:.1f}s', 'es': '  ✗ DESAJUSTE DE PUNTO FINAL: JSON termina {0} | Log termina {1} | diff={2:.1f}s'},
     'seg_hdr':      {'en': '── [4] SEGMENT TIMING CHECK (≤5s tolerance) ──', 'es': '── [4] VERIFICACIÓN DE TIEMPOS (tolerancia ≤5s) ──'},
+    'segment_summary': {'en': '  Total segments: {0} | Matched: {1} | Mismatched: {2} | Not found: {3}', 'es': '  Total segmentos: {0} | Coinciden: {1} | No coinciden: {2} | No encontrados: {3}'},
+    'mismatch_detail': {'en': '  ✗ MISMATCH: {0} | JSON={1} | XML={2} | diff={3:.1f}s', 'es': '  ✗ NO COINCIDE: {0} | JSON={1} | XML={2} | diff={3:.1f}s'},
+    'not_in_log':   {'en': '  ✗ NOT IN LOG: {0} @ {1} | {2}',       'es': '  ✗ NO EN LOG: {0} @ {1} | {2}'},
+    'all_match':    {'en': '  ✓ All {0} segments match within 5 seconds', 'es': '  ✓ Todos los {0} segmentos coinciden dentro de 5 segundos'},
+    'examples':     {'en': '  Examples (early / mid / late):',      'es': '  Ejemplos (temprano / medio / tarde):'},
+    'example_line': {'en': '    {0} @ {1} — diff={2:.1f}s — {3:.1f}h into broadcast', 'es': '    {0} @ {1} — diff={2:.1f}s — {3:.1f}h en emisión'},
     'pl_full':      {'en': 'FULL (marker present)',                 'es': 'COMPLETO (marcador presente)'},
     'pl_partial':   {'en': 'CURRENT (partial)',                     'es': 'ACTUAL (parcial)'},
     'pl_none':      {'en': '— no JSON —',                          'es': '— sin JSON —'},
     'no_json':      {'en': '  ℹ  Log provided but no matching JSON found', 'es': '  ℹ  Log provisto pero sin JSON correspondiente'},
     'no_log':       {'en': '  ℹ  JSON found but no matching log provided', 'es': '  ℹ  JSON encontrado pero sin log correspondiente'},
+    'xml_parse_error': {'en': '  ! XML log provided but no data parsed (check format)', 'es': '  ! Log XML proporcionado pero sin datos analizados (verificar formato)'},
 }
 def SL(key, lang): return SONY_L.get(key, {}).get(lang, SONY_L.get(key, {}).get('en', key))
 
@@ -263,7 +283,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
             elif pair['json_data'] is not None and pair['xml_file'] is None:
                 pairing_lines.append(SL('no_log', lang))
                 try:
-                    r_lines, _ = check_sony(pair['json_data'], [], None, lang)
+                    r_lines, _ = check_sony(pair['json_data'], [], None, lang, SL)
                     pairing_lines += r_lines
                 except: pass
             elif pair['json_data'] is not None and pair['xml_file'] is not None:
@@ -271,7 +291,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
                     pair['xml_file'].seek(0)
                     xml_rows_sony = parse_sony_xml_log(pair['xml_file'])
                     r_lines, _ = check_sony(pair['json_data'], xml_rows_sony,
-                                            pair['xml_filename'], lang)
+                                            pair['xml_filename'], lang, SL)
                     pairing_lines += r_lines
                 except Exception as e:
                     pairing_lines.append(f'  ERROR: {e}')
