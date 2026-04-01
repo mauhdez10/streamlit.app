@@ -13,11 +13,26 @@ from checker import (
     parse_sony_json_markers
 )
 
+st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
+
 SONY_EMOJI = {
     'A1':'🅰️','A2':'🅰️','A3':'🅰️','A4':'🅰️','A5':'🅰️','A6':'🅰️',
     'F1':'🎬','F4':'🎬',
     'S1':'📡','S2':'📡','S3':'📡','S4':'📡','S5':'📡','S6':'📡',
 }
+SONY_L = {
+    'markers_hdr':  {'en': '── [1] MARKERS ──',                    'es': '── [1] MARCADORES ──'},
+    'no_marker':    {'en': '  ℹ  No markers found (partial/current playlist)', 'es': '  ℹ  Sin marcadores (playlist parcial/actual)'},
+    'log_hdr':      {'en': '── [2] LOG FILE MATCH ──',             'es': '── [2] VERIFICACIÓN DE ARCHIVO LOG ──'},
+    'ep_hdr':       {'en': '── [3] ENDPOINT CHECK ──',             'es': '── [3] VERIFICACIÓN DE PUNTO FINAL ──'},
+    'seg_hdr':      {'en': '── [4] SEGMENT TIMING CHECK (≤5s tolerance) ──', 'es': '── [4] VERIFICACIÓN DE TIEMPOS (tolerancia ≤5s) ──'},
+    'pl_full':      {'en': 'FULL (marker present)',                 'es': 'COMPLETO (marcador presente)'},
+    'pl_partial':   {'en': 'CURRENT (partial)',                     'es': 'ACTUAL (parcial)'},
+    'pl_none':      {'en': '— no JSON —',                          'es': '— sin JSON —'},
+    'no_json':      {'en': '  ℹ  Log provided but no matching JSON found', 'es': '  ℹ  Log provisto pero sin JSON correspondiente'},
+    'no_log':       {'en': '  ℹ  JSON found but no matching log provided', 'es': '  ℹ  JSON encontrado pero sin log correspondiente'},
+}
+def SL(key, lang): return SONY_L.get(key, {}).get(lang, SONY_L.get(key, {}).get('en', key))
 
 # ── LANGUAGE ──────────────────────────────────────────────────────────────────
 lang = st.radio('🌐', ['English', 'Español'], horizontal=True, label_visibility='collapsed')
@@ -277,18 +292,18 @@ if st.button(t('run'), type='primary', use_container_width=True):
             pairing_lines = []
             sep60 = '═' * 60
             markers_in_json = parse_sony_json_markers(pair['json_data']) if pair['json_data'] else []
-            if pair['json_data'] is None: pl_type = '— no JSON —'
-            elif markers_in_json: pl_type = 'FULL (marker present)'
-            else: pl_type = 'CURRENT (partial)'
+            if pair['json_data'] is None: pl_type = SL('pl_none', lang)
+            elif markers_in_json: pl_type = SL('pl_full', lang)
+            else: pl_type = SL('pl_partial', lang)
             pairing_lines += [sep60, f'CHANNEL: {pair["code"]} — {pair["channel_name"]}']
             if pair['date']: pairing_lines.append(f'DATE: {pair["date"]}')
             pairing_lines += [f'PLAYLIST TYPE: {pl_type}',
                               f'JSON: {pair["json_file"].name if pair["json_file"] else "— not provided —"}',
                               f'LOG:  {pair["xml_filename"] or "— not provided —"}', sep60]
             if pair['json_data'] is None and pair['xml_file']:
-                pairing_lines.append('  ℹ  Log provided but no matching JSON found')
+                pairing_lines.append(SL('no_json', lang))
             elif pair['json_data'] is not None and pair['xml_file'] is None:
-                pairing_lines.append('  ℹ  JSON found but no matching log provided')
+                pairing_lines.append(SL('no_log', lang))
                 try:
                     r_lines, _ = check_sony(pair['json_data'], [], None, lang)
                     pairing_lines += r_lines
@@ -338,7 +353,8 @@ if st.button(t('run'), type='primary', use_container_width=True):
                                        key=f'dl_{key_prefix}_{date_str}_{ch}')
         else:
             st.text(day_text)
-        st.download_button(t('dl') + f' ({date_str})', day_text,
+        dl_day_lbl = (f'⬇ {"Current" if lang=="en" else "Actual"} {date_str} (.txt)')
+        st.download_button(dl_day_lbl, day_text,
                            file_name=f'report_{date_str}_{datetime.now().strftime("%H%M%S")}.txt',
                            mime='text/plain', use_container_width=True,
                            key=f'dl_{key_prefix}_{date_str}_all')
@@ -359,7 +375,8 @@ if st.button(t('run'), type='primary', use_container_width=True):
         # All tab
         with tabs[0]:
             st.text(full_text)
-            st.download_button(t('dl'), full_text,
+            dl_lbl = '⬇ Full Report (.txt)' if lang=='en' else '⬇ Reporte Completo (.txt)'
+            st.download_button(dl_lbl, full_text,
                                file_name=f'report_all_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                                mime='text/plain', use_container_width=True, key='dl_all')
 
@@ -374,12 +391,14 @@ if st.button(t('run'), type='primary', use_container_width=True):
             with tabs[sony_tab_start + i]:
                 ch_text = '\n'.join(header_lines + ch_lines)
                 st.text(ch_text)
-                st.download_button(t('dl'), ch_text,
+                dl_lbl2 = f'⬇ {"Current" if lang=="en" else "Actual"} {code} (.txt)'
+                st.download_button(dl_lbl2, ch_text,
                                    file_name=f'report_{code}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                                    mime='text/plain', use_container_width=True,
                                    key=f'dl_sony_{code}')
     else:
         st.text(full_text)
-        st.download_button(t('dl'), full_text,
+        dl_lbl3 = '⬇ Full Report (.txt)' if lang=='en' else '⬇ Reporte Completo (.txt)'
+        st.download_button(dl_lbl3, full_text,
                            file_name=f'report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                            mime='text/plain', use_container_width=True, key='dl_single_all')

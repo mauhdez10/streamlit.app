@@ -703,6 +703,14 @@ def pair_sony_files(sony_files, lang='en'):
                     used_xmls.add(id(xf))
                     break
 
+        # Last resort: if only one XML for this channel code, pair it
+        if not matched_xml:
+            available = [xf for xf in xml_list
+                         if xf['code'] == code and id(xf) not in used_xmls]
+            if len(available) == 1:
+                matched_xml = available[0]
+                used_xmls.add(id(matched_xml))
+
         used_jsons.add(id(jf))
         pairings.append({
             'label':        f'{ch_name} — {jinfo["date"] or "?"}',
