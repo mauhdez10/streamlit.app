@@ -218,20 +218,48 @@ def build_show_sequence(programs, from_start=None):
 # ── XML PARSER ────────────────────────────────────────────────────────────────
 
 def parse_xml_log(filepath_or_bytes):
+    """
+    Parse standard XML traffic log.
+    Auto-detects format:
+      - <traffics><traffic><item>  → standard (CATV, TVD, original Pasiones)
+      - <tabledata><data><row>     → tabledata (TN, Pasiones after format change, Sony)
+    Safe to use for all channels — routes to the correct parser internally.
+    """
     try:
         if hasattr(filepath_or_bytes, 'read'): content = filepath_or_bytes.read()
         elif isinstance(filepath_or_bytes, bytes): content = filepath_or_bytes
         else:
             with open(filepath_or_bytes, 'rb') as f: content = f.read()
+        # Sanitize unescaped & that break XML parser (e.g. P&G in title fields)
+        content = re.sub(rb'&(?![a-zA-Z#][a-zA-Z0-9#]*;)', b'&amp;', content)
         root = ET.fromstring(content)
-        traffic = root.find('traffic')
-        if traffic is None: traffic = root
-        return [{'mediaid': i.get('mediaid',''), 'name': i.findtext('n','').strip(),
-                 'contenttype': i.findtext('contenttype','').strip().upper(),
-                 'startat': i.findtext('startat','').strip(),
-                 'duration': i.findtext('duration','').strip(),
-                 'externalid': i.findtext('externalid','').strip()}
-                for i in traffic.findall('item')]
+        # Auto-detect format
+        if root.tag == 'tabledata':
+            # tabledata format — same logic as parse_xml_log_tn
+            items = []
+            for row in root.findall('.//row'):
+                local_time = row.findtext('column-1', '').strip()
+                mediaid    = row.findtext('column-4', '').strip()
+                typ        = row.findtext('column-5', '').strip().upper()
+                title      = row.findtext('column-6', '').strip()
+                duration   = row.findtext('column-3', '').strip()
+                if typ == 'PROGRAM':    ct = 'PROGRAM_BEGIN'
+                elif typ == 'PROMOTION': ct = 'PROMO'
+                else:                    ct = typ
+                items.append({'mediaid': mediaid, 'name': title,
+                              'contenttype': ct, 'startat': local_time,
+                              'duration': duration, 'externalid': ''})
+            return items
+        else:
+            # Standard <traffics><traffic><item> format
+            traffic = root.find('traffic')
+            if traffic is None: traffic = root
+            return [{'mediaid': i.get('mediaid',''), 'name': i.findtext('n','').strip(),
+                     'contenttype': i.findtext('contenttype','').strip().upper(),
+                     'startat': i.findtext('startat','').strip(),
+                     'duration': i.findtext('duration','').strip(),
+                     'externalid': i.findtext('externalid','').strip()}
+                    for i in traffic.findall('item')]
     except: return []
 
 def parse_xml_log_tn(filepath_or_bytes):
