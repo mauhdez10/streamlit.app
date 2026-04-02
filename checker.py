@@ -1286,15 +1286,18 @@ def parse_sony_xml_log(filepath_or_bytes):
             typ   = row.findtext('column-5','').strip().upper()
             mid   = row.findtext('column-4','').strip()
             lt    = row.findtext('column-1','').strip()
-            dur   = row.findtext('column-3','').strip().split(';')[0]
+            dur_raw = row.findtext('column-3','').strip()
             title = row.findtext('column-6','').strip()
             try:
                 dt = datetime.strptime(lt, '%Y-%m-%d %H:%M:%S')
             except:
                 dt = None
             try:
-                h,m_,s = dur.split(':')
-                dur_secs = int(h)*3600 + int(m_)*60 + int(s)
+                # Duration format: HH:MM:SS;FF — include frames (30fps)
+                dur_parts = dur_raw.split(';')
+                h, m_, s = dur_parts[0].split(':')
+                frames = int(dur_parts[1]) if len(dur_parts) > 1 else 0
+                dur_secs = int(h)*3600 + int(m_)*60 + int(s) + frames/30
             except:
                 dur_secs = 0
             rows.append({'mediaid': mid, 'local_dt': dt,
@@ -1421,12 +1424,15 @@ def check_sony(json_data, xml_rows, xml_filename, lang='en'):
             for ev in reversed(events):
                 for a in ev.get('assets', []):
                     if a.get('type') == 'Program':
-                        st  = ev.get('startTime', '')[:19]
-                        dur = ev.get('duration', '').split(';')[0].split('@')[0]
+                        st      = ev.get('startTime', '')[:19]
+                        dur_raw = ev.get('duration', '').split('@')[0]
                         try:
                             sdt = datetime.strptime(st, '%Y-%m-%d %H:%M:%S')
-                            h,m_,s = dur.split(':')
-                            json_end_dt = sdt + timedelta(hours=int(h), minutes=int(m_), seconds=int(s))
+                            dur_parts = dur_raw.split(';')
+                            h, m_, s = dur_parts[0].split(':')
+                            frames = int(dur_parts[1]) if len(dur_parts) > 1 else 0
+                            json_end_dt = sdt + timedelta(hours=int(h), minutes=int(m_),
+                                                          seconds=int(s) + frames//30)
                         except:
                             pass
                         break
