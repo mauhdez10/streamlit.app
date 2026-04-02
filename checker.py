@@ -626,9 +626,10 @@ def detect_files(uploaded_files):
             ftype = 'xml'
         elif ext == 'pdf':
             # HolaTV PDF grilla only
-            if 'USH' in name_up:
+            if 'USH' in name_up or ('HOLA' in name_up and 'US' in name_up):
                 grillas.setdefault('hu', []).append(f)
-            elif 'LATAM' in name_up and ('HOLA' in name_up or 'HL' in name_up):
+            elif 'LATAM' in name_up:
+                # Accept any LATAM PDF as HolaTV Latam grilla
                 grillas.setdefault('hl', []).append(f)
             else:
                 unknown.append(f)
@@ -674,9 +675,9 @@ def detect_files(uploaded_files):
             else: unknown.append(f); continue
         elif ext == 'json':
             # JSON channel detection
-            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or 'HOLA_US' in name_up or ('HOLATV' in name_up and '_US_' in name_up):
+            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or 'HOLA_US' in name_up or ('HOLATV' in name_up and 'US' in name_up):
                 channel = 'hu'
-            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or 'HOLA_LATAM' in name_up or ('HOLATV' in name_up and '_LATAM_' in name_up):
+            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or 'HOLA_LATAM' in name_up or ('HOLATV' in name_up and 'LATAM' in name_up):
                 channel = 'hl'
             elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up or name_up.startswith('PL'):
                 channel = 'latam'
@@ -688,8 +689,10 @@ def detect_files(uploaded_files):
             elif 'CATV' in name_up or name_up.startswith('CA'): channel = 'catv'
             else: unknown.append(f); continue
         else:
-            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or ('HOLATV' in name_up and '_US_' in name_up): channel = 'hu'
-            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or ('HOLATV' in name_up and '_LATAM_' in name_up): channel = 'hl'
+            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or ('HOLATV' in name_up and 'US' in name_up) or name_up.startswith('HU'): 
+                channel = 'hu'
+            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or ('HOLATV' in name_up and 'LATAM' in name_up) or name_up.startswith('HL'): 
+                channel = 'hl'
             elif 'CATV' in name_up:                       channel = 'catv'
             elif 'TVD' in name_up:                        channel = 'tvd'
             elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up: channel = 'latam'
