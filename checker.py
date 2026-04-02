@@ -628,7 +628,7 @@ def detect_files(uploaded_files):
             # HolaTV PDF grilla only
             if 'USH' in name_up:
                 grillas.setdefault('hu', []).append(f)
-            elif 'LATAM' in name_up and 'HOLA' in name_up:
+            elif 'LATAM' in name_up and ('HOLA' in name_up or 'HL' in name_up):
                 grillas.setdefault('hl', []).append(f)
             else:
                 unknown.append(f)
@@ -671,6 +671,21 @@ def detect_files(uploaded_files):
                 grillas['hu'] = f; continue
             elif 'LATAM' in name_up and ('HOLA' in name_up or 'HL' in name_up):
                 grillas['hl'] = f; continue
+            else: unknown.append(f); continue
+        elif ext == 'json':
+            # JSON channel detection
+            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or 'HOLA_US' in name_up or ('HOLATV' in name_up and '_US_' in name_up):
+                channel = 'hu'
+            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or 'HOLA_LATAM' in name_up or ('HOLATV' in name_up and '_LATAM_' in name_up):
+                channel = 'hl'
+            elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up or name_up.startswith('PL'):
+                channel = 'latam'
+            elif 'PASIONES_US' in name_up or 'PASIONES US' in name_up or name_up.startswith('PUS'):
+                channel = 'us'
+            elif 'FAST_TODONOVELAS' in name_up or 'FAST TODONOVELAS' in name_up or ('TODO' in name_up and 'NOVELA' in name_up):
+                channel = 'tn'
+            elif 'TVD' in name_up: channel = 'tvd'
+            elif 'CATV' in name_up or name_up.startswith('CA'): channel = 'catv'
             else: unknown.append(f); continue
         else:
             if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or ('HOLATV' in name_up and '_US_' in name_up): channel = 'hu'
@@ -1274,16 +1289,19 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
     lines += [sep, f'{T("summary",lang)}: {len(part_seq)} {T("show_blocks",lang)} | {total_comms} {T("commercials_lbl",lang)}', '']
 
     lines.append(f'── [1] {T("section_programs",lang)} ──')
+    prog_lines = []
     if is_tn and grilla_ids:
-        lines += check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
+        prog_lines = check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
     elif not grilla_ids:
-        lines.append(T('no_grilla', lang))
+        prog_lines = [T('no_grilla', lang)]
     else:
-        lines += check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
+        prog_lines = check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
+    lines += prog_lines
     lines.append('')
 
     lines.append(f'── [2] {T("section_commercials",lang)} ──')
     manual_warns = []
+    comm_lines = []
     if not xml_rows:
         lines.append(T('no_xml', lang))
     elif is_tn:
@@ -1317,6 +1335,32 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
         lines += check_cue_tones(playlist, lang)
         lines.append('')
 
+    # ─ Collect Manual Review warnings ─
+    manual_review_needed_lbl = {'en': '⚠ Manual Review needed:',  'es': '⚠ Revisión manual requerida:'}
+    
+    # Check for problems in program section
+    for line in prog_lines:
+        if any(marker in line for marker in ['⚠', '✗', 'WRONG EPISODE', 'NOT IN PLAYLIST', 'EXTRA']):
+            # Extract show/episode info from line - try to get from parentheses or just use the line
+            warn_line = line.strip()
+            if warn_line and any(x in warn_line for x in ['⚠', '✗']):
+                manual_warns.append(f'PROGRAM: {warn_line}')
+    
+    # Check for commercial changes (these are already in manual_warns from check_commercials_vs_xml)
+    
+    # Add consolidated manual review section if there are warnings
+    if manual_warns:
+        lines.append('')
+        lines.append('═' * 60)
+        lines.append(manual_review_needed_lbl[lang])
+        seen_warns = set()
+        for warn in manual_warns:
+            # Deduplicate similar warnings
+            if warn not in seen_warns:
+                lines.append(f'  • {warn}')
+                seen_warns.add(warn)
+        lines.append('═' * 60)
+    
     lines.append(sep)
     return '\n'.join(lines), manual_warns
 

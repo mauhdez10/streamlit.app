@@ -116,26 +116,46 @@ if uploaded:
             if not gf.name.lower().endswith('.pdf'):
                 try:
                     from openpyxl import load_workbook
+                    from checker import _parse_date_str
                     gf.seek(0)
                     wb = load_workbook(io.BytesIO(gf.read()), read_only=True)
                     gf.seek(0)
                     if ch_key in ('latam', 'us', 'tn', 'hl'):
-                        for name in wb.sheetnames:
+                        # Extract date range from first sheet with dates (scan all sheets in reverse order as checker.py does)
+                        for name in reversed(wb.sheetnames):
                             ws = wb[name]
                             rs = list(ws.iter_rows(max_row=2, values_only=True))
                             if len(rs) > 1:
+                                dates_found = []
                                 for cell in rs[1]:
-                                    if cell and hasattr(cell, 'strftime'):
-                                        grilla_date_str = cell.strftime('%m/%d')
+                                    d = _parse_date_str(cell)
+                                    if d:
+                                        dates_found.append(d)
+                                if dates_found:
+                                    # Show first and last date of the week range
+                                    dates_found.sort()
+                                    first_d = dates_found[0]
+                                    last_d = dates_found[-1]
+                                    if first_d == last_d:
+                                        grilla_date_str = first_d.strftime('%m/%d')
+                                    else:
+                                        grilla_date_str = f'{first_d.strftime("%m/%d")}-{last_d.strftime("%m/%d")}'
+                                    break
+                        if grilla_date_str == '(Week)':
+                            # Fallback: look for dates in string format
+                            for name in wb.sheetnames:
+                                ws = wb[name]
+                                rs = list(ws.iter_rows(max_row=2, values_only=True))
+                                if len(rs) > 1:
+                                    for cell in rs[1]:
+                                        if cell and isinstance(cell, str) and '/' in str(cell):
+                                            import re as _re
+                                            m = _re.search(r'(\d{1,2})/(\d{1,2})', str(cell))
+                                            if m:
+                                                grilla_date_str = f'{m.group(1).zfill(2)}/{m.group(2).zfill(2)}'
+                                                break
+                                    if grilla_date_str != '(Week)':
                                         break
-                                    elif cell and isinstance(cell, str) and '/' in str(cell):
-                                        import re as _re
-                                        m = _re.search(r'(\d{1,2})/(\d{1,2})', str(cell))
-                                        if m:
-                                            grilla_date_str = f'{m.group(1).zfill(2)}/{m.group(2).zfill(2)}'
-                                            break
-                            if grilla_date_str != '(Week)':
-                                break
                     else:
                         ws = wb.active
                         rs = list(ws.iter_rows(max_row=2, values_only=True))
