@@ -1810,16 +1810,25 @@ def check_holatv_programs(playlist, grilla_entries, current_start, lang):
     """
     Compare HolaTV JSON program sequence vs grilla entries.
     grilla_entries: [{'code', 'episode', 'time_slot'}, ...]
+    HPP (infomercials) are acknowledged but NOT validated against grilla.
     """
-    # Build JSON show sequence (HPP treated as INF programs)
+    # Build JSON show sequence (excluding HPP which are infomercials)
     json_seq = []
+    hpp_entries = []  # Track infomercials separately
     prev_id = None
     for p in playlist['programs']:
         if current_start and p['start'] and p['start'] < current_start:
             continue
         ref = p['episode_id_raw']
         code = _ref_to_holatv_code(ref) or ref
-        ep_m = re.search(r'(\d{3,4})(?:_\d+)?$', ref)
+        
+        # Skip HPP entries from validation (just track them)
+        if code == 'INF':
+            hpp_entries.append({'code': 'INF', 'episode': None, 'ref': ref,
+                               'start': p['start'], 'name': p['name']})
+            continue
+        
+        ep_m = re.search(r'(\d{2,4})(?:_\d+)?$', ref)  # Match 2-4 digits (handles leading zeros)
         ep_num = int(ep_m.group(1)) if ep_m else None
         uid = f'{code}:{ep_num}'
         if uid != prev_id:
@@ -1827,48 +1836,46 @@ def check_holatv_programs(playlist, grilla_entries, current_start, lang):
                              'start': p['start'], 'name': p['name']})
             prev_id = uid
 
-    # Also include HPP commercials as program-equivalent entries
-    hpp_programs = []
-    for c in playlist['commercials']:
-        ref = c.get('ref', c.get('asset_ref', ''))
-        if ref.startswith('HPP'):
-            if current_start and c['start'] and c['start'] < current_start:
-                continue
-            hpp_programs.append({'code': 'INF', 'episode': None, 'ref': ref,
-                                  'start': c['start'], 'name': c['name']})
-
-    # Merge HPP into program sequence by start time
-    all_progs = sorted(json_seq + hpp_programs, key=lambda x: x['start'] or datetime.min)
-
     if not grilla_entries:
         lines = [f'  ℹ  {"No grilla provided" if lang=="en" else "Sin grilla proporcionada"}']
         lines.append('')
-        for p in all_progs[:20]:
-            lines.append(f'  {fmt_t(p["start"])}  {p["code"]:6}  ep={p["episode"]}  {p["ref"]}')
+        # Show programs AND infomercials
+        all_items = sorted(json_seq + hpp_entries, key=lambda x: x['start'] or datetime.min)
+        for item in all_items[:20]:
+            ep_str = f"ep={item['episode']}" if item['episode'] is not None else 'infomercial'
+            lines.append(f'  {fmt_t(item["start"])}  {item["code"]:6}  {ep_str:12}  {item["ref"]}')
         return lines
 
     lines = []
-    # Simple comparison: grilla order vs JSON order
-    grilla_ids = [(g['code'].rstrip('_'), g['episode']) for g in grilla_entries]
-    json_ids   = [(p['code'], p['episode']) for p in all_progs]
+    
+    # Show infomercials as informational (not validated)
+    if hpp_entries:
+        lines.append(f'  ℹ  {"Infomercials (not validated):" if lang=="en" else "Publirreportajes (no validados):"}')
+        for hpp in hpp_entries:
+            lines.append(f'        {fmt_t(hpp["start"])}  {hpp["ref"]} • {hpp["name"][:30]}')
+        lines.append('')
 
+    # Compare REAL programs (excluding HPP) against grilla
+    # Normalize episode numbers for comparison (strip leading zeros)
+    def norm_ep(ep):
+        return ep if ep is None else int(ep)
+    
     # Check what's in grilla but not in JSON
-    json_set = set(json_ids)
     for g in grilla_entries:
         gc = g['code'].rstrip('_')
-        ep = g['episode']
-        found = any(_codes_match(p['ref'], g['code']) and p['episode'] == ep
-                    for p in all_progs)
+        ep = norm_ep(g['episode'])
+        found = any(_codes_match(p['ref'], g['code']) and norm_ep(p['episode']) == ep
+                    for p in json_seq)
         if not found:
             ts = g['time_slot']
             lines.append(f'  ✗  {"NOT IN PLAYLIST" if lang=="en" else "NO EN PLAYLIST"}: '
                          f'{g["code"]} ep{ep} @ {ts}')
 
-    # Check what's in JSON but not in grilla
-    for p in all_progs:
-        found = any(_codes_match(p['ref'], g['code']) and p['episode'] == g['episode']
+    # Check what's in JSON (programs only, not HPP) but not in grilla
+    for p in json_seq:
+        found = any(_codes_match(p['ref'], g['code']) and norm_ep(p['episode']) == norm_ep(g['episode'])
                     for g in grilla_entries)
-        if not found and p['episode'] is not None:
+        if not found:
             lines.append(f'  ✗  {"EXTRA (not in grilla)" if lang=="en" else "EXTRA (no en grilla)"}: '
                          f'{p["ref"]} ep{p["episode"]} @ {fmt_t(p["start"])}')
 
