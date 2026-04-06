@@ -1268,7 +1268,71 @@ def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
     return issues
 
 
-def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None):
+
+
+def check_programs_vs_grilla_pasiones(playlist, grilla_ids, current_start, lang):
+    """
+    Pasiones program check: grilla lists each show ONCE per day.
+    Playlist re-airs the same episodes multiple times — this is expected.
+    Logic:
+      - Every grilla episode must appear at least once in playlist → else NOT IN PLAYLIST
+      - EXTRA = playlist has an episode whose PREFIX does not appear in grilla at all
+      - Wrong episode = same prefix in grilla, different number in playlist
+    Re-airs of grilla episodes are NOT flagged as EXTRA.
+    """
+    is_partial = current_start is not None
+    part_seq   = build_show_sequence(playlist['programs'], from_start=current_start)
+
+    if not grilla_ids:
+        return [T('no_grilla', lang)]
+
+    # Anchor for partial playlists
+    if is_partial and part_seq:
+        first_id  = part_seq[0]['id']
+        first_pfx = show_prefix(first_id)
+        anchor = 0
+        for i, gid in enumerate(grilla_ids):
+            if gid == first_id or (first_pfx and show_prefix(gid) == first_pfx):
+                anchor = i; break
+        issues = [T('anchored', lang, i=anchor+1, id=grilla_ids[anchor] if grilla_ids else '?')]
+        grilla_slice = grilla_ids[anchor:]
+    else:
+        grilla_slice = grilla_ids[:]
+        issues = []
+
+    grilla_set     = set(grilla_slice)
+    grilla_prefixes = {show_prefix(g) for g in grilla_slice}
+    pl_set          = {p['id'] for p in part_seq}
+    pl_counter      = Counter(p['id'] for p in part_seq)
+
+    # Check each grilla entry — must appear at least once in playlist
+    for gid in grilla_slice:
+        if gid in pl_set:
+            continue  # found (any occurrence) ✓
+        pfx = show_prefix(gid)
+        same_pfx = [p for p in part_seq if show_prefix(p['id']) == pfx and p['id'] != gid]
+        if same_pfx:
+            issues.append(T('wrong_ep', lang, g=gid, p=same_pfx[0]['id'], t=fmt_t(same_pfx[0]['start'])))
+        elif is_partial and any(p['episode_id'] == gid for p in playlist['programs']
+                                if p['start'] and p['start'] < current_start):
+            issues.append(T('already_aired', lang, id=gid))
+        else:
+            issues.append(T('not_in_pl', lang, id=gid))
+
+    # EXTRA = show whose PREFIX does not appear anywhere in the grilla
+    reported_extra = set()
+    for p in part_seq:
+        pid = p['id']
+        pfx = show_prefix(pid)
+        if pfx not in grilla_prefixes and pid not in reported_extra:
+            issues.append(T('extra_pl', lang, id=pid, t=fmt_t(p['start'])))
+            reported_extra.add(pid)
+
+    if not any(x.strip().startswith(('✗', '⚠', '↔')) for x in issues):
+        issues.append(f'  {T("ok_programs", lang)}')
+    return issues
+
+def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None, is_pasiones=False):
     sep = '═' * 60
     pt  = playlist['type']
     current_start = playlist['programs'][0]['start'] if pt == 'current' and playlist['programs'] else None
@@ -1295,6 +1359,8 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
     prog_lines = []
     if is_tn and grilla_ids:
         prog_lines = check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
+    elif is_pasiones and grilla_ids:
+        prog_lines = check_programs_vs_grilla_pasiones(playlist, grilla_ids, current_start, lang)
     elif not grilla_ids:
         prog_lines = [T('no_grilla', lang)]
     else:
@@ -1812,29 +1878,34 @@ def check_holatv_programs(playlist, grilla_entries, current_start, lang):
     grilla_entries: [{'code', 'episode', 'time_slot'}, ...]
     HPP (infomercials) are acknowledged but NOT validated against grilla.
     """
-    # Build JSON show sequence (excluding HPP which are infomercials)
-    json_seq = []
-    hpp_entries = []  # Track infomercials separately
-    prev_id = None
+    # Build JSON show sequence — count re-airs per (code, episode) pair
+    # Uses Counter so each re-air of the same show is tracked separately
+    hpp_entries  = []
+    json_seq     = []  # ordered, one entry per show-block (first seg only)
+    json_counter = Counter()   # (code, ep_num) -> count of airings
+    prev_base    = None
     for p in playlist['programs']:
         if current_start and p['start'] and p['start'] < current_start:
             continue
-        ref = p['episode_id_raw']
+        ref  = p['episode_id_raw']
         code = _ref_to_holatv_code(ref) or ref
-        
-        # Skip HPP entries from validation (just track them)
+
         if code == 'INF':
             hpp_entries.append({'code': 'INF', 'episode': None, 'ref': ref,
-                               'start': p['start'], 'name': p['name']})
+                                'start': p['start'], 'name': p['name']})
             continue
-        
-        ep_m = re.search(r'(\d{2,4})(?:_\d+)?$', ref)  # Match 2-4 digits (handles leading zeros)
+
+        ep_m   = re.search(r'(\d{2,4})(?:_\d+)?$', ref)
         ep_num = int(ep_m.group(1)) if ep_m else None
-        uid = f'{code}:{ep_num}'
-        if uid != prev_id:
+        base   = re.sub(r'_\d+$', '', ref)  # strip segment suffix
+
+        if base != prev_base:
+            # New show-block starts
+            json_counter[(code, ep_num)] += 1
             json_seq.append({'code': code, 'episode': ep_num, 'ref': ref,
-                             'start': p['start'], 'name': p['name']})
-            prev_id = uid
+                             'start': p['start'], 'name': p['name'],
+                             'airing': json_counter[(code, ep_num)]})
+            prev_base = base
 
     if not grilla_entries:
         lines = [f'  ℹ  {"No grilla provided" if lang=="en" else "Sin grilla proporcionada"}']
@@ -1855,31 +1926,52 @@ def check_holatv_programs(playlist, grilla_entries, current_start, lang):
             lines.append(f'        {fmt_t(hpp["start"])}  {hpp["ref"]} • {hpp["name"][:30]}')
         lines.append('')
 
-    # Compare REAL programs (excluding HPP) against grilla
-    # Normalize episode numbers for comparison (strip leading zeros)
+    # Compare using Counter — grilla count vs playlist count per (code, ep)
     def norm_ep(ep):
         return ep if ep is None else int(ep)
-    
-    # Check what's in grilla but not in JSON
+
+    # Count grilla occurrences per (code_letters, ep_num)
+    grilla_counter = Counter()
+    grilla_info    = {}  # (code_letters, ep_num) -> g entry
     for g in grilla_entries:
-        gc = g['code'].rstrip('_')
-        ep = norm_ep(g['episode'])
-        found = any(_codes_match(p['ref'], g['code']) and norm_ep(p['episode']) == ep
-                    for p in json_seq)
-        if not found:
-            ts = g['time_slot']
-            lines.append(f'  ✗  {"NOT IN PLAYLIST" if lang=="en" else "NO EN PLAYLIST"}: '
-                         f'{g["code"]} ep{ep} @ {ts}')
+        gc  = g['code'].rstrip('_')
+        ep  = norm_ep(g['episode'])
+        key = (gc, ep)
+        grilla_counter[key] += 1
+        grilla_info[key] = g
 
-    # Check what's in JSON (programs only, not HPP) but not in grilla
+    # Count JSON occurrences per (code_letters, ep_num)
+    pl_counter = Counter()
+    pl_first   = {}
     for p in json_seq:
-        found = any(_codes_match(p['ref'], g['code']) and norm_ep(p['episode']) == norm_ep(g['episode'])
-                    for g in grilla_entries)
-        if not found:
-            lines.append(f'  ✗  {"EXTRA (not in grilla)" if lang=="en" else "EXTRA (no en grilla)"}: '
-                         f'{p["ref"]} ep{p["episode"]} @ {fmt_t(p["start"])}')
+        key = (p['code'], norm_ep(p['episode']))
+        pl_counter[key] += 1
+        if key not in pl_first:
+            pl_first[key] = p
 
-    return lines if lines else [f'  ✓  {"Program order matches grilla" if lang=="en" else "Orden de programas coincide con grilla"}']
+    all_keys = set(grilla_counter) | set(pl_counter)
+    for key in sorted(all_keys, key=lambda k: (k[0], k[1] or 0)):
+        gc_count = grilla_counter.get(key, 0)
+        pl_count = pl_counter.get(key, 0)
+        code_str, ep_num = key
+        if gc_count == pl_count:
+            continue
+        g_entry = grilla_info.get(key)
+        p_entry = pl_first.get(key)
+        ts      = g_entry['time_slot'] if g_entry else '?'
+        if gc_count > pl_count:
+            diff = gc_count - pl_count
+            suffix = f' ({diff}x missing, grilla={gc_count} playlist={pl_count})' if diff > 1 else ''
+            lines.append(f'  ✗  {"NOT IN PLAYLIST" if lang=="en" else "NO EN PLAYLIST"}: '
+                         f'{code_str}__ ep{ep_num} @ {ts}{suffix}')
+        else:
+            diff = pl_count - gc_count
+            suffix = f' ({diff}x extra, grilla={gc_count} playlist={pl_count})' if diff > 1 else ''
+            t_str = fmt_t(p_entry["start"]) if p_entry else '?'
+            lines.append(f'  ✗  {"EXTRA (not in grilla)" if lang=="en" else "EXTRA (no en grilla)"}: '
+                         f'{p_entry["ref"] if p_entry else code_str} ep{ep_num} @ {t_str}{suffix}')
+
+    return lines if lines else [f'  ✓  {"All shows match grilla" if lang=="en" else "Todos los programas coinciden con la grilla"}']
 
 
 def check_holatv_timing(playlist, grilla_entries, current_start, lang, tolerance_secs=30):
@@ -1893,15 +1985,18 @@ def check_holatv_timing(playlist, grilla_entries, current_start, lang, tolerance
     ok_count = 0
 
     for g in grilla_entries:
-        # Parse grilla time slot as datetime
+        # Parse grilla time slot — grilla is in ET, convert to UTC
         try:
             ts_h, ts_m = map(int, g['time_slot'].split(':'))
-            # Use playlist date; handle overnight (00:xx = next day)
-            from datetime import date as _d, timedelta as _td
             pd = playlist['date']
-            slot_dt = datetime(pd.year, pd.month, pd.day, ts_h, ts_m)
+            slot_et = datetime(pd.year, pd.month, pd.day, ts_h, ts_m)
             if ts_h < 6:  # overnight slot belongs to next logical day
-                slot_dt += _td(days=1)
+                slot_et += timedelta(days=1)
+            # ET → UTC: determine EDT (+4h) vs EST (+5h)
+            edt_s = _edt_start(slot_et.year)
+            est_s = _est_start(slot_et.year)
+            offset = 4 if edt_s <= slot_et < est_s else 5
+            slot_dt = slot_et + timedelta(hours=offset)
         except Exception:
             continue
 
