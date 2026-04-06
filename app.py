@@ -159,9 +159,8 @@ if st.button(t('run'), type='primary', use_container_width=True):
     }
 
     def process_one(channel, json_file, xml_file, grilla_file):
-        is_tn      = (channel == 'tn')
-        is_pasiones = channel in ('latam', 'us')
-        lines      = []
+        is_tn  = (channel == 'tn')
+        lines  = []
         file_info  = {
             'json':   json_file.name  if json_file   else None,
             'xml':    xml_file.name   if xml_file    else None,
@@ -200,7 +199,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
         try:
             report_text, manual_warns = generate_report(
                 ch_label, playlist, xml_rows, grilla_ids, lang,
-                is_tn=is_tn, file_info=file_info, is_pasiones=is_pasiones)
+                is_tn=is_tn, file_info=file_info)
             lines.append(report_text)
         except Exception as e:
             lines.append(f'  ERROR generating report: {e}')
@@ -231,15 +230,28 @@ if st.button(t('run'), type='primary', use_container_width=True):
                 # grillas stores a list — pick the one whose week matches this date
                 gf_list  = grillas.get(channel, [])
                 if not isinstance(gf_list, list): gf_list = [gf_list] if gf_list else []
+                grilla_warn = None
                 try:
                     from datetime import datetime as _dt2
                     from checker import pick_grilla_for_date
                     td = _dt2.strptime(date_str, '%Y-%m-%d').date()
-                    grilla_f = pick_grilla_for_date(gf_list, td, channel)
+                    grilla_f, grilla_warn = pick_grilla_for_date(gf_list, td, channel)
                 except:
                     grilla_f = gf_list[0] if gf_list else None
-                jsons    = sorted(info['json'], key=lambda f: f.name)
+                # Sort: partial (no marker) before full (has marker)
+                def _is_full(jf):
+                    try:
+                        jf.seek(0)
+                        d = json.load(jf)
+                        jf.seek(0)
+                        return any(a.get('type')=='marker'
+                                   for ev in d.get('events',[])[:3]
+                                   for a in ev.get('assets',[]))
+                    except: jf.seek(0); return False
+                jsons = sorted(info['json'], key=lambda f: (1 if _is_full(f) else 0, f.name))
                 ch_lines = []
+                if grilla_warn:
+                    ch_lines.append(f'  ⚠  {grilla_warn}')
                 for jf in jsons:
                     ch_lines.append(f'JSON: {jf.name}')
                     if xml_file:  xml_file.seek(0)

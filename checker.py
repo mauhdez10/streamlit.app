@@ -113,7 +113,9 @@ def is_episode_id(val):
     val = val.strip()
     if ' ' in val or len(val) < 3 or len(val) > 16: return False
     if not re.match(r'^[A-Z]', val): return False
-    return len(re.findall(r'\d', val)) >= 3
+    if len(re.findall(r'\d', val)) >= 3: return True
+    if re.match(r'^[A-Z]{3,8}$', val): return True
+    return False
 
 def normalize_id(ep_id):
     if not ep_id: return ''
@@ -126,8 +128,13 @@ def normalize_id(ep_id):
     return ep_id.upper()
 
 def show_prefix(ep_id):
-    m = re.match(r'^([A-Za-z]{2,})', ep_id)
-    return m.group(1).upper() if m else ''
+    if not ep_id: return ''
+    ep_id = ep_id.upper()
+    m = re.match(r'^([A-Z]+)', ep_id)
+    if not m: return ''
+    letters = m.group(1)
+    if re.match(r'^[A-Z]{3,8}$', ep_id): return ep_id
+    return letters
 
 
 # ── JSON PARSER ───────────────────────────────────────────────────────────────
@@ -405,6 +412,9 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
     episode_ids = []
     for row in all_rows[2:]:
         val = row[target_col] if target_col < len(row) else None
+        # Safety net: skip rows where the target-date cell is empty or non-ID
+        # (handles extra ET header rows that clients sometimes add mid-grid)
+        if val is None: continue
         for ep in extract_ids(val):
             if ep: episode_ids.append(ep)
     return episode_ids
@@ -876,8 +886,13 @@ def check_programs_vs_grilla(playlist, grilla_ids, current_start, lang):
         pfx_g = show_prefix(gid)
         pfx_p = show_prefix(pid)
 
-        # Same prefix → wrong episode (e.g. COSA0326 vs COSA0402)
-        if pfx_g and pfx_g == pfx_p:
+        # Same prefix OR one starts with other → wrong episode
+        # Handles: COSA0326 vs COSA0402, and MARCE vs MARCELO
+        pfx_match = (pfx_g and pfx_p and (
+            pfx_g == pfx_p or
+            pfx_g.startswith(pfx_p) or pfx_p.startswith(pfx_g)
+        ))
+        if pfx_match:
             issues.append(T('wrong_ep', lang, g=gid, p=pid, t=fmt_t(p['start'])))
             gi += 1; pi += 1; continue
 
@@ -1332,7 +1347,7 @@ def check_programs_vs_grilla_pasiones(playlist, grilla_ids, current_start, lang)
         issues.append(f'  {T("ok_programs", lang)}')
     return issues
 
-def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None, is_pasiones=False):
+def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None):
     sep = '═' * 60
     pt  = playlist['type']
     current_start = playlist['programs'][0]['start'] if pt == 'current' and playlist['programs'] else None
@@ -1357,11 +1372,7 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
 
     lines.append(f'── [1] {T("section_programs",lang)} ──')
     prog_lines = []
-    if is_tn and grilla_ids:
-        prog_lines = check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
-    elif is_pasiones and grilla_ids:
-        prog_lines = check_programs_vs_grilla_pasiones(playlist, grilla_ids, current_start, lang)
-    elif not grilla_ids:
+    if not grilla_ids:
         prog_lines = [T('no_grilla', lang)]
     else:
         prog_lines = check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
@@ -2169,7 +2180,7 @@ def pick_grilla_for_date(grilla_list, target_date, channel):
     """
     When multiple grilla files uploaded for same channel (different weeks),
     pick the one whose week contains target_date.
-    Falls back to first file if no match found.
+    Returns (file, warning_string). warning_string is None if match found.
     """
     if not grilla_list: return None
     if len(grilla_list) == 1: return grilla_list[0]
@@ -2184,7 +2195,7 @@ def pick_grilla_for_date(grilla_list, target_date, channel):
             gf.seek(0)
             # PDF grilla — no date range to check, just return it
             if gf.name.lower().endswith('.pdf'):
-                return gf
+                return gf, None
             wb = load_workbook(io.BytesIO(data), read_only=True)
             if channel in ('latam', 'us', 'tn', 'hl'):
                 # Multi-tab: scan tabs for target_date
@@ -2195,7 +2206,7 @@ def pick_grilla_for_date(grilla_list, target_date, channel):
                     for cell in rows[1]:
                         d = _parse_date_str(cell, force_year=target_date.year) if cell else None
                         if d == target_date:
-                            gf.seek(0); return gf
+                            gf.seek(0); return gf, None
             else:
                 # CATV/TVD: row 2 contains Monday date in col 2
                 ws = wb.active
@@ -2206,12 +2217,29 @@ def pick_grilla_for_date(grilla_list, target_date, channel):
                         monday = monday_val.date()
                         for offset in range(7):
                             if monday + timedelta(days=offset) == target_date:
-                                gf.seek(0); return gf
+                                gf.seek(0); return gf, None
         except Exception:
             pass
 
+    # No week matched — return first file with a warning
     grilla_list[0].seek(0)
-    return grilla_list[0]  # fallback
+    grilla_dates = []
+    try:
+        from openpyxl import load_workbook
+        import io
+        grilla_list[0].seek(0)
+        wb2 = load_workbook(io.BytesIO(grilla_list[0].read()), read_only=True)
+        grilla_list[0].seek(0)
+        ws2 = wb2.active
+        row2 = list(ws2.iter_rows(max_row=2, values_only=True))
+        if len(row2) > 1:
+            mv = row2[1][2] if len(row2[1]) > 2 else None
+            if mv and hasattr(mv, 'strftime'):
+                grilla_dates = f'{mv.strftime("%m/%d")} — {(mv + timedelta(days=6)).strftime("%m/%d")}'
+    except Exception:
+        grilla_dates = grilla_list[0].name
+    warn = f'Grid week ({grilla_dates}) does not contain {target_date} — program check may be wrong'
+    return grilla_list[0], warn
 
 
 # ── HOLATV XLSX / TXT LOG PARSERS ────────────────────────────────────────────
