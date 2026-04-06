@@ -115,12 +115,6 @@ def is_episode_id(val):
     if not re.match(r'^[A-Z]', val): return False
     return len(re.findall(r'\d', val)) >= 3
 
-def is_movie_id(val):
-    """Movie/special IDs: pure uppercase alpha, 3-8 chars. MARCE, NELQP, CAME."""
-    if not val or not isinstance(val, str): return False
-    val = val.strip()
-    return bool(re.match(r'^[A-Z]{3,8}$', val))
-
 def normalize_id(ep_id):
     if not ep_id: return ''
     ep_id = re.sub(r'_\d+$', '', str(ep_id).strip())
@@ -132,13 +126,8 @@ def normalize_id(ep_id):
     return ep_id.upper()
 
 def show_prefix(ep_id):
-    if not ep_id: return ''
-    ep_id = ep_id.upper()
-    m = re.match(r'^([A-Z]+)', ep_id)
-    if not m: return ''
-    letters = m.group(1)
-    if re.match(r'^[A-Z]{3,8}$', ep_id): return ep_id
-    return letters
+    m = re.match(r'^([A-Za-z]{2,})', ep_id)
+    return m.group(1).upper() if m else ''
 
 
 # ── JSON PARSER ───────────────────────────────────────────────────────────────
@@ -373,49 +362,26 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
     from openpyxl import load_workbook
     import io
     if isinstance(filepath_or_bytes, str):
-        wb = load_workbook(filepath_or_bytes, read_only=False)
+        wb = load_workbook(filepath_or_bytes, read_only=True)
     else:
         raw = filepath_or_bytes.read() if hasattr(filepath_or_bytes, 'read') else filepath_or_bytes
-        wb = load_workbook(io.BytesIO(raw), read_only=False)
+        wb = load_workbook(io.BytesIO(raw), read_only=True)
 
     ws = wb.active
-    # Keep two views: values_only for formulas, full rows for bold detection
-    all_rows_full = list(ws.iter_rows(values_only=False))
-    all_rows = [[cell.value for cell in row] for row in all_rows_full]
+    all_rows = list(ws.iter_rows(values_only=True))
     if len(all_rows) < 2: return []
 
     header_row = all_rows[1]
-    # Build date→col map, skipping ET/UTC/CA marker columns
-    _NON_DATE = {'ET', 'UTC', 'CA', 'E.T.', 'U.T.C.'}
-    date_col_map = {}
-    for ci, val in enumerate(header_row):
-        if val is None: continue
-        if isinstance(val, str) and val.strip().upper() in _NON_DATE: continue
-        if hasattr(val, 'date'):
-            date_col_map[val.date()] = ci
-        elif isinstance(val, str) and val.strip().startswith('='):
-            # Formula like =C2+5 — resolve base date + offset
-            m2 = re.match(r'^=([A-Z]+)(\d+)\+(\d+)$', val.strip())
-            if m2:
-                try:
-                    base_ci = sum((ord(c)-ord('A')+1)*(26**i)
-                                 for i,c in enumerate(reversed(m2.group(1))))-1
-                    base_ri = int(m2.group(2))-1
-                    base_v  = all_rows[base_ri][base_ci] if base_ri < len(all_rows) and base_ci < len(all_rows[base_ri]) else None
-                    if base_v and hasattr(base_v, 'date'):
-                        date_col_map[(base_v + timedelta(days=int(m2.group(3)))).date()] = ci
-                except Exception:
-                    pass
-    target_col = date_col_map.get(target_date)
-    if target_col is None and date_col_map:
-        # Fallback: find Monday and walk by weekday offset
-        monday_d = min(date_col_map.keys())
-        monday_c = date_col_map[monday_d]
-        for offset in range(7):
-            if monday_d + timedelta(days=offset) == target_date:
-                target_col = monday_c + offset; break
-    if target_col is None:
-        return []
+    target_col = None
+    try:
+        monday_val = header_row[2]
+        monday = monday_val.date() if hasattr(monday_val, 'date') else None
+        if monday:
+            for offset in range(7):
+                if monday + timedelta(days=offset) == target_date:
+                    target_col = 2 + offset; break
+    except: pass
+    if target_col is None: target_col = 2 + target_date.weekday()
 
     def resolve_cell(val):
         if not val or not isinstance(val, str): return val
@@ -432,24 +398,13 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
         val = resolve_cell(val)
         if not val or not isinstance(val, str) or val.startswith('='): return []
         val = val.strip()
-        # Full cell is an episode ID (standard with digits)
         if is_episode_id(val): return [normalize_id(val)]
-        # Full cell is a movie/special ID (pure alpha, no digits)
-        if is_movie_id(val): return [normalize_id(val)]
-        # Cell has mixed content — tokenize and extract only standard IDs (digits required)
-        # Do NOT apply movie_id check on tokens to avoid extracting description words
         tokens = re.findall(r'[A-Z0-9]+', val.upper())
         return [normalize_id(t) for t in tokens if is_episode_id(t)]
 
     episode_ids = []
-    for ri, row in enumerate(all_rows[2:], start=2):
+    for row in all_rows[2:]:
         val = row[target_col] if target_col < len(row) else None
-        if val is None: continue
-        # Only extract bold cells — bold = show ID, non-bold = description text
-        full_row = all_rows_full[ri] if ri < len(all_rows_full) else []
-        cell = full_row[target_col] if target_col < len(full_row) else None
-        is_bold = (cell is not None and cell.font is not None and cell.font.bold)
-        if not is_bold: continue
         for ep in extract_ids(val):
             if ep: episode_ids.append(ep)
     return episode_ids
@@ -665,35 +620,10 @@ def detect_files(uploaded_files):
         name_up = f.name.upper()
         ext = f.name.lower().rsplit('.', 1)[-1] if '.' in f.name else ''
 
-        if ext == 'json':
-            ftype = 'json'
-        elif ext == 'xml':
-            ftype = 'xml'
-        elif ext == 'pdf':
-            # HolaTV PDF grilla only
-            if 'USH' in name_up or ('HOLA' in name_up and 'US' in name_up):
-                grillas.setdefault('hu', []).append(f)
-            elif 'LATAM' in name_up:
-                # Accept any LATAM PDF as HolaTV Latam grilla
-                grillas.setdefault('hl', []).append(f)
-            else:
-                unknown.append(f)
-            continue
-        elif ext in ('xlsx', 'xlsm'):
-            # HolaTV XLSX log (not grilla)
-            if name_up.startswith('HU'):
-                ftype = 'log'; 
-            elif name_up.startswith('HL'):
-                ftype = 'log'
-            else:
-                ftype = 'grilla'
-        elif ext == 'txt':
-            if name_up.startswith('HU') or name_up.startswith('HL'):
-                ftype = 'log'
-            else:
-                unknown.append(f); continue
-        else:
-            unknown.append(f); continue
+        if ext == 'json':            ftype = 'json'
+        elif ext == 'xml':           ftype = 'xml'
+        elif ext in ('xlsx','xlsm'): ftype = 'grilla'
+        else: unknown.append(f); continue
 
         # Sony/AXN detection — check before generic channel detection
         sony_code = extract_sony_code(f.name)
@@ -703,11 +633,11 @@ def detect_files(uploaded_files):
 
         # Channel detection
         if ext == 'xml':
-            if name_up.startswith('TVD'):   channel = 'tvd'
-            elif name_up.startswith('CA'):  channel = 'catv'
+            if name_up.startswith('CA'):    channel = 'catv'
+            elif name_up.startswith('TVD'): channel = 'tvd'
             elif name_up.startswith('PL'):  channel = 'latam'
             elif name_up.startswith('PUS'): channel = 'us'
-            elif name_up.startswith('TN'):  channel = 'tn'
+            elif name_up.startswith('TN_') or (name_up.startswith('TN') and not name_up.startswith('TVD')): channel = 'tn'
             elif name_up.startswith('HU'):  channel = 'hu'
             elif name_up.startswith('HL'):  channel = 'hl'
             else: unknown.append(f); continue
@@ -718,35 +648,18 @@ def detect_files(uploaded_files):
             elif 'LATAM' in name_up and ('HOLA' in name_up or 'HL' in name_up):
                 grillas['hl'] = f; continue
             else: unknown.append(f); continue
-        elif ext == 'json':
-            # JSON channel detection
-            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or 'HOLA_US' in name_up or ('HOLATV' in name_up and 'US' in name_up):
-                channel = 'hu'
-            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or 'HOLA_LATAM' in name_up or ('HOLATV' in name_up and 'LATAM' in name_up):
-                channel = 'hl'
-            elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up or name_up.startswith('PL'):
-                channel = 'latam'
-            elif 'PASIONES_US' in name_up or 'PASIONES US' in name_up or name_up.startswith('PUS'):
-                channel = 'us'
-            elif 'FAST_TODONOVELAS' in name_up or 'FAST TODONOVELAS' in name_up or ('TODO' in name_up and 'NOVELA' in name_up):
-                channel = 'tn'
-            elif 'TVD' in name_up: channel = 'tvd'
-            elif 'CATV' in name_up or name_up.startswith('CA'): channel = 'catv'
-            else: unknown.append(f); continue
         else:
-            if 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or ('HOLATV' in name_up and 'US' in name_up) or name_up.startswith('HU'): 
-                channel = 'hu'
-            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or ('HOLATV' in name_up and 'LATAM' in name_up) or name_up.startswith('HL'): 
-                channel = 'hl'
-            elif 'CATV' in name_up:                       channel = 'catv'
-            elif 'TVD' in name_up:                        channel = 'tvd'
+            if 'CATV' in name_up:                       channel = 'catv'
+            elif 'TVD' in name_up:                      channel = 'tvd'
             elif 'PASIONES_LATAM' in name_up or 'PASIONES LATAM' in name_up: channel = 'latam'
             elif 'PASIONES_US' in name_up or 'PASIONES US' in name_up:       channel = 'us'
             elif 'FAST_TODONOVELAS' in name_up or 'FAST TODONOVELAS' in name_up or ('TODO' in name_up and 'NOVELA' in name_up): channel = 'tn'
+            elif 'HOLATV_US' in name_up or 'HOLA_TV_US' in name_up or ('HOLAT' in name_up and 'US' in name_up): channel = 'hu'
+            elif 'HOLATV_LATAM' in name_up or 'HOLA_TV_LATAM' in name_up or ('HOLAT' in name_up and 'LATAM' in name_up): channel = 'hl'
             else: unknown.append(f); continue
 
         if ftype == 'grilla':
-            grillas.setdefault(channel, []).append(f)
+            grillas[channel] = f
             continue
 
         # Date extraction
@@ -761,10 +674,9 @@ def detect_files(uploaded_files):
 
         key = (str(date), channel)
         if key not in days:
-            days[key] = {'json': [], 'xml': None, 'log': None, 'date': date}
+            days[key] = {'json': [], 'xml': None, 'date': date}
         if ftype == 'json':  days[key]['json'].append(f)
         elif ftype == 'xml': days[key]['xml'] = f
-        elif ftype == 'log': days[key]['log'] = f
 
     return days, grillas, unknown, sony_files
 
@@ -873,123 +785,56 @@ def pair_sony_files(sony_files, lang='en'):
 # ── CHECKS ────────────────────────────────────────────────────────────────────
 
 def check_programs_vs_grilla(playlist, grilla_ids, current_start, lang):
-    """
-    LCS-diff based program comparison. Handles:
-    - Re-airs (walks both sequences in order, so second occurrence is checked at its position)
-    - Replacements (CEND0402 deleted / NP0402 added — reports both, no cascading false errors)
-    - Wrong episodes (same prefix, different date suffix)
-    - Insertions / deletions
-    """
-    is_partial = current_start is not None
-    part_seq   = build_show_sequence(playlist['programs'], from_start=current_start)
+    issues = []
+    is_partial = (current_start is not None)
+    full_seq = build_show_sequence(playlist['programs'])
+    part_seq = build_show_sequence(playlist['programs'], from_start=current_start)
 
-    if not grilla_ids:
-        return [T('no_grilla', lang)]
-
-    # Anchor partial playlist to correct grilla occurrence (handles re-air anchoring)
     if is_partial and part_seq:
-        first_id  = part_seq[0]['id']
+        anchor, first_id = 0, part_seq[0]['id']
         first_pfx = show_prefix(first_id)
-        # Count how many times first_id aired BEFORE current_start
-        pre_count = sum(1 for p in playlist['programs']
-                        if p['episode_id'] == first_id
-                        and p['start'] and p['start'] < current_start)
-        anchor, found_count = 0, 0
         for i, gid in enumerate(grilla_ids):
             if gid == first_id or (first_pfx and show_prefix(gid) == first_pfx):
-                if found_count == pre_count:
-                    anchor = i; break
-                found_count += 1
-        issues = [T('anchored', lang, i=anchor+1, id=grilla_ids[anchor] if grilla_ids else '?')]
+                anchor = i; break
+        issues.append(T('anchored', lang, i=anchor+1, id=grilla_ids[anchor] if grilla_ids else '?'))
         grilla_slice = grilla_ids[anchor:]
     else:
-        grilla_slice = grilla_ids[:]
-        issues = []
+        grilla_slice = grilla_ids
 
-    # LCS sequential walk
-    WINDOW = 8
-    gi, pi = 0, 0
+    pl_set     = {p['id'] for p in part_seq}
+    grilla_set = set(grilla_slice)
+    reported   = set()
 
-    while gi < len(grilla_slice) and pi < len(part_seq):
-        gid = grilla_slice[gi]
-        p   = part_seq[pi]
-        pid = p['id']
-
-        if gid == pid:
-            gi += 1; pi += 1; continue
-
-        pfx_g = show_prefix(gid)
-        pfx_p = show_prefix(pid)
-
-        # Same prefix → wrong episode (COSA0326 vs COSA0402)
-        # For movie IDs (pure alpha like MARCE): also catch MARCE vs MARCELO
-        is_movie_g = bool(re.match(r'^[A-Z]{3,8}$', gid))
-        is_movie_p = bool(re.match(r'^[A-Z]{3,8}$', pid))
-        pfx_match = (pfx_g and pfx_p and (
-            pfx_g == pfx_p or
-            ((is_movie_g or is_movie_p) and
-             (pfx_g.startswith(pfx_p) or pfx_p.startswith(pfx_g)))
-        ))
-        if pfx_match:
-            issues.append(T('wrong_ep', lang, g=gid, p=pid, t=fmt_t(p['start'])))
-            gi += 1; pi += 1; continue
-
-        # Look ahead
-        future_pl = [part_seq[pi+k]['id'] for k in range(1, min(WINDOW+1, len(part_seq)-pi))]
-        future_gr = list(grilla_slice[gi+1:gi+WINDOW+1])
-
-        gid_ahead_pl = gid in future_pl
-        pid_ahead_gr = pid in future_gr
-
-        if not gid_ahead_pl and not pid_ahead_gr:
-            # Replacement: grilla has X, playlist has Y, neither in each other near future
-            deleted_lbl = 'DELETED' if lang == 'en' else 'ELIMINADO'
-            added_lbl   = 'ADDED'   if lang == 'en' else 'AGREGADO'
-            issues.append(f'  ↔  {deleted_lbl}: {gid} / {added_lbl}: {pid} @ {fmt_t(p["start"])}')
-            gi += 1; pi += 1
-
-        elif not gid_ahead_pl:
-            # Grilla show deleted from playlist
-            issues.append(T('not_in_pl', lang, id=gid))
-            gi += 1
-
-        elif not pid_ahead_gr:
-            # Extra show in playlist not in grilla
-            issues.append(T('extra_pl', lang, id=pid, t=fmt_t(p['start'])))
-            pi += 1
-
-        else:
-            # Both in each other's future — realign via shortest path
-            pl_offset = future_pl.index(gid) + 1   # steps in pl to reach gid
-            gr_offset = future_gr.index(pid) + 1    # steps in gr to reach pid
-            if pl_offset <= gr_offset:
-                for k in range(pl_offset):
-                    issues.append(T('extra_pl', lang, id=part_seq[pi+k]['id'],
-                                    t=fmt_t(part_seq[pi+k]['start'])))
-                pi += pl_offset
-            else:
-                for k in range(gr_offset):
-                    issues.append(T('not_in_pl', lang, id=grilla_slice[gi+k]))
-                gi += gr_offset
-
-    # Tail: remaining grilla entries not in playlist
-    while gi < len(grilla_slice):
-        gid = grilla_slice[gi]
-        if is_partial and any(p['episode_id'] == gid for p in playlist['programs']
-                              if p['start'] and p['start'] < current_start):
+    for gid in grilla_slice:
+        if gid in pl_set or gid in reported: continue
+        pfx = show_prefix(gid)
+        pl_same = [p for p in part_seq if show_prefix(p['id']) == pfx and p['id'] != gid]
+        if pl_same:
+            issues.append(T('wrong_ep', lang, g=gid, p=pl_same[0]['id'], t=fmt_t(pl_same[0]['start'])))
+        elif is_partial and any(p['episode_id'] == gid for p in playlist['programs']):
             issues.append(T('already_aired', lang, id=gid))
         else:
             issues.append(T('not_in_pl', lang, id=gid))
-        gi += 1
+        reported.add(gid)
 
-    # Tail: remaining playlist entries
-    while pi < len(part_seq):
-        issues.append(T('extra_pl', lang, id=part_seq[pi]['id'], t=fmt_t(part_seq[pi]['start'])))
-        pi += 1
+    for p in part_seq:
+        if p['id'] not in grilla_set:
+            pfx = show_prefix(p['id'])
+            if not [g for g in grilla_slice if show_prefix(g) == pfx and g != p['id']]:
+                issues.append(T('extra_pl', lang, id=p['id'], t=fmt_t(p['start'])))
 
-    has_errors = any(x.strip().startswith(('✗','⚠','↔')) for x in issues)
+    pl_ord = [p['id'] for p in part_seq if p['id'] in grilla_set]
+    gr_ord = [g for g in grilla_slice if g in pl_set]
+    n_mis  = 0
+    for i, (pl, gr) in enumerate(zip(pl_ord, gr_ord)):
+        if pl != gr and n_mis < 6:
+            issues.append(T('order_mis', lang, i=i+1, g=gr, p=pl))
+            n_mis += 1
+
+    has_errors = any(x.strip().startswith(('✗','⚠  W','⚠  O','⚠  E')) for x in issues)
     if not has_errors:
-        issues.append(f'  {T("ok_programs", lang)}')
+        ok_line = T('ok_programs', lang)
+        issues.append(f'  {ok_line}')
     return issues
 
 
@@ -1274,89 +1119,49 @@ def check_cue_tones(playlist, lang='en'):
 
 def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
     """
-    TN program check: Counter-based, grilla anchored to partial window.
-    - Counts only seg_num==1 program entries (first segment of each airing).
-    - For partial playlists: grilla is sliced starting from the first episode
-      that appears in the JSON window, so pre-window airings are ignored on
-      both sides (not flagged as missing).
+    TN program check: grilla has (show_name, ep_num) pairs.
+    JSON episode info is in p['name'] field (e.g. 'GENESIS_E122').
+    Uses set-based comparison (unique episodes only).
     """
     import re as _re
 
-    def parse_ep_num(raw_ref):
-        m = _re.search(r'_E(\d+)', str(raw_ref))
+    def parse_ep_num(name):
+        m = _re.search(r'_E(\d+)$', str(name))
         return int(m.group(1)) if m else None
 
-    # JSON counter: seg_num==1 only, from current_start onward
-    json_counter = Counter()
-    json_first   = {}
+    # Unique episode numbers from grilla (deduplicated)
+    grilla_eps = {}  # ep_num -> show_name (first occurrence)
+    for show_name, ep_num in grilla_pairs:
+        if ep_num not in grilla_eps:
+            grilla_eps[ep_num] = show_name
+
+    # Unique episodes from JSON — use p['name'] which has the episode info
+    seen, json_eps = set(), {}
     for p in playlist['programs']:
-        if current_start and p['start'] and p['start'] < current_start:
-            continue
-        if p.get('seg_num', 1) != 1:
-            continue
-        ep_num = parse_ep_num(p['episode_id_raw'])
+        ref = p['episode_id_raw']
+        if ref in seen: continue
+        seen.add(ref)
+        if current_start and p['start'] and p['start'] < current_start: continue
+        ep_num = parse_ep_num(p['name'])
         if ep_num is not None:
-            json_counter[ep_num] += 1
-            if ep_num not in json_first:
-                json_first[ep_num] = p
-
-    # Anchor grilla: slice from the position matching the first JSON episode
-    grilla_slice = list(grilla_pairs)
-    anchor_label = None
-    if current_start and json_counter:
-        # Ordered first episode in JSON window
-        first_ep = next((parse_ep_num(p['episode_id_raw'])
-                         for p in playlist['programs']
-                         if (not p['start'] or p['start'] >= current_start)
-                         and p.get('seg_num', 1) == 1
-                         and parse_ep_num(p['episode_id_raw']) is not None), None)
-        if first_ep is not None:
-            # Count how many times this episode aired BEFORE current_start
-            pre = sum(1 for p in playlist['programs']
-                      if parse_ep_num(p['episode_id_raw']) == first_ep
-                      and p.get('seg_num', 1) == 1
-                      and p['start'] and p['start'] < current_start)
-            # Find the (pre+1)th occurrence in grilla
-            seen = 0
-            for i, (name, ep) in enumerate(grilla_slice):
-                if ep == first_ep:
-                    if seen == pre:
-                        grilla_slice  = grilla_slice[i:]
-                        anchor_label  = f'{name} ep{first_ep}'
-                        break
-                    seen += 1
-
-    grilla_counter = Counter(ep for _, ep in grilla_slice if ep is not None)
-    grilla_names   = {ep: name for name, ep in grilla_slice if ep is not None}
+            json_eps[ep_num] = {'name': p['name'], 'start': p['start']}
 
     issues = []
-    if anchor_label:
-        issues.append(T('anchored', lang, i=1, id=anchor_label))
+    for ep, show in sorted(grilla_eps.items()):
+        if ep not in json_eps:
+            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}')
 
-    all_eps = sorted(set(grilla_counter) | set(json_counter))
-    for ep in all_eps:
-        gc   = grilla_counter.get(ep, 0)
-        jc   = json_counter.get(ep, 0)
-        show = grilla_names.get(ep, f'ep{ep}')
-        info = json_first.get(ep, {})
-        if gc == jc:
-            continue
-        if gc > jc:
-            diff   = gc - jc
-            suffix = f' ({diff}x missing, grilla={gc} playlist={jc})' if diff > 1 else ''
-            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}{suffix}')
-        else:
-            diff   = jc - gc
-            t_str  = fmt_t(info.get('start')) if info.get('start') else '?'
-            suffix = f' ({diff}x extra, grilla={gc} playlist={jc})' if diff > 1 else ''
-            ep_id  = info.get('episode_id', f'ep{ep}')
-            issues.append(f'  ✗  EXTRA IN PLAYLIST: {ep_id} @ {t_str} (not in grilla){suffix}')
+    for ep, info in sorted(json_eps.items()):
+        if ep not in grilla_eps:
+            issues.append(
+                f'  ✗  EXTRA IN PLAYLIST: {info["name"]} @ {fmt_t(info["start"])} (not in grilla)')
 
-    if not any('✗' in i for i in issues):
-        issues.append(f'  ✓  All {len(grilla_counter)} episodes match grilla')
+    if not issues:
+        issues.append(f'  ✓  All {len(json_eps)} episodes match grilla')
     return issues
 
-def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None):
+
+def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False):
     sep = '═' * 60
     pt  = playlist['type']
     current_start = playlist['programs'][0]['start'] if pt == 'current' and playlist['programs'] else None
@@ -1368,34 +1173,21 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
              f'{T("channel",lang)}: {channel.upper()}',
              f'{T("date_lbl",lang)}: {playlist["date"]}',
              f'{T("type_lbl",lang)}: {T("full_day",lang) if pt=="full" else T("partial",lang)}']
-    # Visual indicator for partial vs full
-    if pt == 'current':
-        lines.append('▶▶▶  PARTIAL / CURRENT PLAYLIST  ◀◀◀')
     if current_start:
         lines.append(f'{T("checking_from",lang)}: {fmt_t(current_start)}')
-    # Files used for this report block
-    if file_info:
-        files_lbl = "Files" if lang == "en" else "Archivos"
-        lines.append(f'{files_lbl}:')
-        if file_info.get("grilla"): lines.append(f'  Grid:     {file_info["grilla"]}')
-        if file_info.get("xml"):    lines.append(f'  Log:      {file_info["xml"]}')
-        if file_info.get("json"):   lines.append(f'  Playlist: {file_info["json"]}')
     lines += [sep, f'{T("summary",lang)}: {len(part_seq)} {T("show_blocks",lang)} | {total_comms} {T("commercials_lbl",lang)}', '']
 
     lines.append(f'── [1] {T("section_programs",lang)} ──')
-    prog_lines = []
     if is_tn and grilla_ids:
-        prog_lines = check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
+        lines += check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
     elif not grilla_ids:
-        prog_lines = [T('no_grilla', lang)]
+        lines.append(T('no_grilla', lang))
     else:
-        prog_lines = check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
-    lines += prog_lines
+        lines += check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
     lines.append('')
 
     lines.append(f'── [2] {T("section_commercials",lang)} ──')
     manual_warns = []
-    comm_lines = []
     if not xml_rows:
         lines.append(T('no_xml', lang))
     elif is_tn:
@@ -1429,32 +1221,6 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
         lines += check_cue_tones(playlist, lang)
         lines.append('')
 
-    # ─ Collect Manual Review warnings ─
-    manual_review_needed_lbl = {'en': '⚠ Manual Review needed:',  'es': '⚠ Revisión manual requerida:'}
-    
-    # Check for problems in program section
-    for line in prog_lines:
-        if any(marker in line for marker in ['⚠', '✗', 'WRONG EPISODE', 'NOT IN PLAYLIST', 'EXTRA']):
-            # Extract show/episode info from line - try to get from parentheses or just use the line
-            warn_line = line.strip()
-            if warn_line and any(x in warn_line for x in ['⚠', '✗']):
-                manual_warns.append(f'PROGRAM: {warn_line}')
-    
-    # Check for commercial changes (these are already in manual_warns from check_commercials_vs_xml)
-    
-    # Add consolidated manual review section if there are warnings
-    if manual_warns:
-        lines.append('')
-        lines.append('═' * 60)
-        lines.append(manual_review_needed_lbl[lang])
-        seen_warns = set()
-        for warn in manual_warns:
-            # Deduplicate similar warnings
-            if warn not in seen_warns:
-                lines.append(f'  • {warn}')
-                seen_warns.add(warn)
-        lines.append('═' * 60)
-    
     lines.append(sep)
     return '\n'.join(lines), manual_warns
 
@@ -1901,102 +1667,69 @@ def check_holatv_programs(playlist, grilla_entries, current_start, lang):
     """
     Compare HolaTV JSON program sequence vs grilla entries.
     grilla_entries: [{'code', 'episode', 'time_slot'}, ...]
-    HPP (infomercials) are acknowledged but NOT validated against grilla.
     """
-    # Build JSON show sequence — count re-airs per (code, episode) pair
-    # Uses Counter so each re-air of the same show is tracked separately
-    hpp_entries  = []
-    json_seq     = []  # ordered, one entry per show-block (first seg only)
-    json_counter = Counter()   # (code, ep_num) -> count of airings
-    prev_base    = None
+    # Build JSON show sequence (HPP treated as INF programs)
+    json_seq = []
+    prev_id = None
     for p in playlist['programs']:
         if current_start and p['start'] and p['start'] < current_start:
             continue
-        ref  = p['episode_id_raw']
+        ref = p['episode_id_raw']
         code = _ref_to_holatv_code(ref) or ref
-
-        if code == 'INF':
-            hpp_entries.append({'code': 'INF', 'episode': None, 'ref': ref,
-                                'start': p['start'], 'name': p['name']})
-            continue
-
-        ep_m   = re.search(r'(\d{2,4})(?:_\d+)?$', ref)
+        ep_m = re.search(r'(\d{3,4})(?:_\d+)?$', ref)
         ep_num = int(ep_m.group(1)) if ep_m else None
-        base   = re.sub(r'_\d+$', '', ref)  # strip segment suffix
-
-        if base != prev_base:
-            # New show-block starts
-            json_counter[(code, ep_num)] += 1
+        uid = f'{code}:{ep_num}'
+        if uid != prev_id:
             json_seq.append({'code': code, 'episode': ep_num, 'ref': ref,
-                             'start': p['start'], 'name': p['name'],
-                             'airing': json_counter[(code, ep_num)]})
-            prev_base = base
+                             'start': p['start'], 'name': p['name']})
+            prev_id = uid
+
+    # Also include HPP commercials as program-equivalent entries
+    hpp_programs = []
+    for c in playlist['commercials']:
+        ref = c.get('ref', c.get('asset_ref', ''))
+        if ref.startswith('HPP'):
+            if current_start and c['start'] and c['start'] < current_start:
+                continue
+            hpp_programs.append({'code': 'INF', 'episode': None, 'ref': ref,
+                                  'start': c['start'], 'name': c['name']})
+
+    # Merge HPP into program sequence by start time
+    all_progs = sorted(json_seq + hpp_programs, key=lambda x: x['start'] or datetime.min)
 
     if not grilla_entries:
         lines = [f'  ℹ  {"No grilla provided" if lang=="en" else "Sin grilla proporcionada"}']
         lines.append('')
-        # Show programs AND infomercials
-        all_items = sorted(json_seq + hpp_entries, key=lambda x: x['start'] or datetime.min)
-        for item in all_items[:20]:
-            ep_str = f"ep={item['episode']}" if item['episode'] is not None else 'infomercial'
-            lines.append(f'  {fmt_t(item["start"])}  {item["code"]:6}  {ep_str:12}  {item["ref"]}')
+        for p in all_progs[:20]:
+            lines.append(f'  {fmt_t(p["start"])}  {p["code"]:6}  ep={p["episode"]}  {p["ref"]}')
         return lines
 
     lines = []
-    
-    # Show infomercials as informational (not validated)
-    if hpp_entries:
-        lines.append(f'  ℹ  {"Infomercials (not validated):" if lang=="en" else "Publirreportajes (no validados):"}')
-        for hpp in hpp_entries:
-            lines.append(f'        {fmt_t(hpp["start"])}  {hpp["ref"]} • {hpp["name"][:30]}')
-        lines.append('')
+    # Simple comparison: grilla order vs JSON order
+    grilla_ids = [(g['code'].rstrip('_'), g['episode']) for g in grilla_entries]
+    json_ids   = [(p['code'], p['episode']) for p in all_progs]
 
-    # Compare using Counter — grilla count vs playlist count per (code, ep)
-    def norm_ep(ep):
-        return ep if ep is None else int(ep)
-
-    # Count grilla occurrences per (code_letters, ep_num)
-    grilla_counter = Counter()
-    grilla_info    = {}  # (code_letters, ep_num) -> g entry
+    # Check what's in grilla but not in JSON
+    json_set = set(json_ids)
     for g in grilla_entries:
-        gc  = g['code'].rstrip('_')
-        ep  = norm_ep(g['episode'])
-        key = (gc, ep)
-        grilla_counter[key] += 1
-        grilla_info[key] = g
-
-    # Count JSON occurrences per (code_letters, ep_num)
-    pl_counter = Counter()
-    pl_first   = {}
-    for p in json_seq:
-        key = (p['code'], norm_ep(p['episode']))
-        pl_counter[key] += 1
-        if key not in pl_first:
-            pl_first[key] = p
-
-    all_keys = set(grilla_counter) | set(pl_counter)
-    for key in sorted(all_keys, key=lambda k: (k[0], k[1] or 0)):
-        gc_count = grilla_counter.get(key, 0)
-        pl_count = pl_counter.get(key, 0)
-        code_str, ep_num = key
-        if gc_count == pl_count:
-            continue
-        g_entry = grilla_info.get(key)
-        p_entry = pl_first.get(key)
-        ts      = g_entry['time_slot'] if g_entry else '?'
-        if gc_count > pl_count:
-            diff = gc_count - pl_count
-            suffix = f' ({diff}x missing, grilla={gc_count} playlist={pl_count})' if diff > 1 else ''
+        gc = g['code'].rstrip('_')
+        ep = g['episode']
+        found = any(_codes_match(p['ref'], g['code']) and p['episode'] == ep
+                    for p in all_progs)
+        if not found:
+            ts = g['time_slot']
             lines.append(f'  ✗  {"NOT IN PLAYLIST" if lang=="en" else "NO EN PLAYLIST"}: '
-                         f'{code_str}__ ep{ep_num} @ {ts}{suffix}')
-        else:
-            diff = pl_count - gc_count
-            suffix = f' ({diff}x extra, grilla={gc_count} playlist={pl_count})' if diff > 1 else ''
-            t_str = fmt_t(p_entry["start"]) if p_entry else '?'
-            lines.append(f'  ✗  {"EXTRA (not in grilla)" if lang=="en" else "EXTRA (no en grilla)"}: '
-                         f'{p_entry["ref"] if p_entry else code_str} ep{ep_num} @ {t_str}{suffix}')
+                         f'{g["code"]} ep{ep} @ {ts}')
 
-    return lines if lines else [f'  ✓  {"All shows match grilla" if lang=="en" else "Todos los programas coinciden con la grilla"}']
+    # Check what's in JSON but not in grilla
+    for p in all_progs:
+        found = any(_codes_match(p['ref'], g['code']) and p['episode'] == g['episode']
+                    for g in grilla_entries)
+        if not found and p['episode'] is not None:
+            lines.append(f'  ✗  {"EXTRA (not in grilla)" if lang=="en" else "EXTRA (no en grilla)"}: '
+                         f'{p["ref"]} ep{p["episode"]} @ {fmt_t(p["start"])}')
+
+    return lines if lines else [f'  ✓  {"Program order matches grilla" if lang=="en" else "Orden de programas coincide con grilla"}']
 
 
 def check_holatv_timing(playlist, grilla_entries, current_start, lang, tolerance_secs=30):
@@ -2010,18 +1743,15 @@ def check_holatv_timing(playlist, grilla_entries, current_start, lang, tolerance
     ok_count = 0
 
     for g in grilla_entries:
-        # Parse grilla time slot — grilla is in ET, convert to UTC
+        # Parse grilla time slot as datetime
         try:
             ts_h, ts_m = map(int, g['time_slot'].split(':'))
+            # Use playlist date; handle overnight (00:xx = next day)
+            from datetime import date as _d, timedelta as _td
             pd = playlist['date']
-            slot_et = datetime(pd.year, pd.month, pd.day, ts_h, ts_m)
+            slot_dt = datetime(pd.year, pd.month, pd.day, ts_h, ts_m)
             if ts_h < 6:  # overnight slot belongs to next logical day
-                slot_et += timedelta(days=1)
-            # ET → UTC: determine EDT (+4h) vs EST (+5h)
-            edt_s = _edt_start(slot_et.year)
-            est_s = _est_start(slot_et.year)
-            offset = 4 if edt_s <= slot_et < est_s else 5
-            slot_dt = slot_et + timedelta(hours=offset)
+                slot_dt += _td(days=1)
         except Exception:
             continue
 
@@ -2104,7 +1834,7 @@ def check_bugs_holatv(playlist, current_start=None, lang='en'):
     return lines
 
 
-def generate_report_holatv(channel, playlist, xml_rows, grilla_entries, lang='en', file_info=None):
+def generate_report_holatv(channel, playlist, xml_rows, grilla_entries, lang='en'):
     """Generate check report for HolaTV US / Latam channels."""
     sep = '═' * 60
     pt  = playlist['type']
@@ -2127,12 +1857,6 @@ def generate_report_holatv(channel, playlist, xml_rows, grilla_entries, lang='en
              f'TIPO: {"Día completo" if pt=="full" else "Parcial"}']
     if current_start:
         lines.append(f'{"Checking from" if lang=="en" else "Verificando desde"}: {fmt_t(current_start)}')
-    if file_info:
-        files_lbl = "Files" if lang == "en" else "Archivos"
-        lines.append(f'{files_lbl}:')
-        if file_info.get("grilla"): lines.append(f'  Grid:     {file_info["grilla"]}')
-        if file_info.get("xml"):    lines.append(f'  Log:      {file_info["xml"]}')
-        if file_info.get("json"):   lines.append(f'  Playlist: {file_info["json"]}')
     lines += [sep,
               f'{"Summary" if lang=="en" else "Resumen"}: {prog_count} {"shows" if lang=="en" else "programas"} | {hpp_count} {"infomercials (HPP)" if lang=="en" else "infomerciales (HPP)"} | {total_comms} {"commercials" if lang=="en" else "comerciales"}',
               '']
@@ -2172,261 +1896,4 @@ def generate_report_holatv(channel, playlist, xml_rows, grilla_entries, lang='en
         lines += check_cue_tones(playlist, lang)
         lines.append('')
 
-    # DX/CX counts from log
-    if xml_rows:
-        dx = xml_rows[-1].get('_dx_total', sum(1 for r in xml_rows if r.get('contenttype') == 'DX'))
-        cx = xml_rows[-1].get('_cx_total', sum(1 for r in xml_rows if r.get('contenttype') == 'CX'))
-        if dx or cx:
-            lines.append('── [8] DESCONEXION/CONEXION ──')
-            lines.append(f'  DX (Desconexion): {dx}x  |  CX (Conexion): {cx}x')
-            if dx != cx:
-                lines.append('  ⚠  DX/CX count mismatch — check live switch integrity')
-            else:
-                lines.append('  ✓  DX/CX counts match')
-            lines.append('')
-
     return '\n'.join(str(l) for l in lines)
-
-
-# ── GRILLA PICKER (multi-week support) ────────────────────────────────────────
-
-def pick_grilla_for_date(grilla_list, target_date, channel):
-    """
-    When multiple grilla files uploaded for same channel (different weeks),
-    pick the one whose week contains target_date.
-    Returns (file, warning_string). warning_string is None if match found.
-    """
-    if not grilla_list: return None, None
-    if len(grilla_list) == 1: return grilla_list[0], None
-
-    from openpyxl import load_workbook
-    import io
-
-    for gf in grilla_list:
-        try:
-            gf.seek(0)
-            data = gf.read()
-            gf.seek(0)
-            # PDF grilla — no date range to check, just return it
-            if gf.name.lower().endswith('.pdf'):
-                return gf, None
-            wb = load_workbook(io.BytesIO(data), read_only=True)
-            if channel in ('latam', 'us', 'tn', 'hl'):
-                # Multi-tab: scan tabs for target_date
-                for name in reversed(wb.sheetnames):
-                    ws = wb[name]
-                    rows = list(ws.iter_rows(max_row=2, values_only=True))
-                    if len(rows) < 2: continue
-                    for cell in rows[1]:
-                        d = _parse_date_str(cell, force_year=target_date.year) if cell else None
-                        if d == target_date:
-                            gf.seek(0); return gf, None
-            else:
-                # CATV/TVD: row 2 contains Monday date in col 2
-                ws = wb.active
-                rows = list(ws.iter_rows(max_row=2, values_only=True))
-                if len(rows) >= 2:
-                    monday_val = rows[1][2] if len(rows[1]) > 2 else None
-                    if monday_val and hasattr(monday_val, 'date'):
-                        monday = monday_val.date()
-                        for offset in range(7):
-                            if monday + timedelta(days=offset) == target_date:
-                                gf.seek(0); return gf, None
-        except Exception:
-            pass
-
-    # No week matched — return first file with a warning
-    grilla_list[0].seek(0)
-    grilla_dates = []
-    try:
-        from openpyxl import load_workbook
-        import io
-        grilla_list[0].seek(0)
-        wb2 = load_workbook(io.BytesIO(grilla_list[0].read()), read_only=True)
-        grilla_list[0].seek(0)
-        ws2 = wb2.active
-        row2 = list(ws2.iter_rows(max_row=2, values_only=True))
-        if len(row2) > 1:
-            mv = row2[1][2] if len(row2[1]) > 2 else None
-            if mv and hasattr(mv, 'strftime'):
-                grilla_dates = f'{mv.strftime("%m/%d")} — {(mv + timedelta(days=6)).strftime("%m/%d")}'
-    except Exception:
-        grilla_dates = grilla_list[0].name
-    warn = f'Grid week ({grilla_dates}) does not contain {target_date} — program check may be wrong'
-    return grilla_list[0], warn
-
-
-# ── HOLATV XLSX / TXT LOG PARSERS ────────────────────────────────────────────
-
-def _holatv_hora_to_dt(hora_str, log_date):
-    """
-    Convert HolaTV log time HH:MM:SS:FF + log_date to datetime.
-    Times < 06:00 belong to log_date + 1 day (overnight broadcast).
-    """
-    try:
-        parts = hora_str.split(':')
-        h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
-        from datetime import date as _date, timedelta as _td
-        base = datetime(log_date.year, log_date.month, log_date.day, h, m, s)
-        if h < 6:
-            base += timedelta(days=1)
-        return base
-    except Exception:
-        return None
-
-
-def _holatv_tipo_to_ct(tipo):
-    """Map HolaTV Tipo_Even values to standard content types."""
-    t = str(tipo).strip().upper()
-    if t == 'BLOQ':  return 'PROGRAM_BEGIN'
-    if t == 'PASE':  return 'COMMERCIAL'
-    if t in ('PROM', 'CORT'): return 'PROMO'
-    if t in ('DX', 'CX'):    return t  # desconexion / conexion — kept as-is
-    return t
-
-
-def parse_holatv_xlsx_log(file_or_bytes, log_date):
-    """
-    Parse HolaTV XLSX traffic log.
-    Columns: N.Ord., Hora, Tipo_Even., Seg., Rec.Key, Titulo, Duracion, SOM, EOM
-    Returns same dict format as parse_xml_log.
-    """
-    try:
-        from openpyxl import load_workbook
-        import io
-        if hasattr(file_or_bytes, 'read'):
-            file_or_bytes.seek(0)
-            data = file_or_bytes.read()
-            file_or_bytes.seek(0)
-        else:
-            data = file_or_bytes
-        wb = load_workbook(io.BytesIO(data), read_only=True)
-        ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        if not rows: return []
-
-        # Skip header row
-        result = []
-        dx_count = cx_count = 0
-        for row in rows[1:]:
-            if not row or row[0] is None: continue
-            try:
-                hora_raw  = str(row[1]).strip() if row[1] else ''
-                tipo_raw  = str(row[2]).strip() if row[2] else ''
-                rec_key   = str(row[4]).strip() if len(row) > 4 and row[4] else ''
-                titulo    = str(row[5]).strip() if len(row) > 5 and row[5] else ''
-                dur_raw   = str(row[6]).strip() if len(row) > 6 and row[6] else '00:00:00:00'
-            except Exception:
-                continue
-
-            tipo_up = tipo_raw.upper()
-            if tipo_up == 'DX': dx_count += 1
-            if tipo_up == 'CX': cx_count += 1
-
-            ct  = _holatv_tipo_to_ct(tipo_raw)
-            dt  = _holatv_hora_to_dt(hora_raw, log_date)
-            dur = dur_raw.split(':')
-            dur_secs = 0
-            try:
-                dur_secs = int(dur[0])*3600 + int(dur[1])*60 + int(dur[2])
-            except Exception:
-                pass
-
-            result.append({
-                'mediaid':     rec_key,
-                'name':        titulo,
-                'contenttype': ct,
-                'startat':     dt.strftime('%Y-%m-%d %H:%M:%S') if dt else hora_raw,
-                'duration':    dur_raw,
-                'externalid':  '',
-                'local_dt':    dt,
-                'duration_secs': dur_secs,
-                'dx_cx':       (dx_count, cx_count),
-            })
-        # Attach dx/cx totals to last row for retrieval
-        if result:
-            result[-1]['_dx_total'] = dx_count
-            result[-1]['_cx_total'] = cx_count
-        return result
-    except Exception:
-        return []
-
-
-def parse_holatv_txt_log(file_or_bytes, log_date):
-    """
-    Parse HolaTV TXT traffic log (tab-delimited).
-    Key columns: Hora(1), Tipo_Even(2), Rec.Key(25), Titulo(5), Duracion(8)
-    """
-    try:
-        if hasattr(file_or_bytes, 'read'):
-            file_or_bytes.seek(0)
-            raw = file_or_bytes.read()
-            file_or_bytes.seek(0)
-        else:
-            raw = file_or_bytes
-        # Try common encodings
-        for enc in ('utf-8', 'latin-1', 'cp1252'):
-            try:
-                text = raw.decode(enc)
-                break
-            except Exception:
-                pass
-        else:
-            text = raw.decode('latin-1', errors='replace')
-
-        lines = text.splitlines()
-        if not lines: return []
-
-        result = []
-        dx_count = cx_count = 0
-        header_skipped = False
-        for line in lines:
-            if not line.strip(): continue
-            cols = line.rstrip('\r\n').split('\t')
-            if not header_skipped:
-                header_skipped = True
-                if cols[0].strip() in ('N.Ord.', 'N.Ord', 'NORD'): continue
-
-            if len(cols) < 9: continue
-            try:
-                hora_raw = cols[1].strip()
-                tipo_raw = cols[2].strip()
-                # Rec.Key is at index 25 if enough columns, else fall back to index 3 stripped
-                if len(cols) > 25 and cols[25].strip():
-                    rec_key = cols[25].strip()
-                else:
-                    rec_key = cols[3].strip().split('#')[0]  # strip #16:9 suffix
-                titulo   = cols[5].strip() if len(cols) > 5 else ''
-                dur_raw  = cols[8].strip() if len(cols) > 8 else '00:00:00:00'
-            except Exception:
-                continue
-
-            tipo_up = tipo_raw.upper()
-            if tipo_up == 'DX': dx_count += 1
-            if tipo_up == 'CX': cx_count += 1
-
-            ct  = _holatv_tipo_to_ct(tipo_raw)
-            dt  = _holatv_hora_to_dt(hora_raw, log_date)
-            dur = dur_raw.split(':')
-            dur_secs = 0
-            try:
-                dur_secs = int(dur[0])*3600 + int(dur[1])*60 + int(dur[2])
-            except Exception:
-                pass
-
-            result.append({
-                'mediaid':       rec_key,
-                'name':          titulo,
-                'contenttype':   ct,
-                'startat':       dt.strftime('%Y-%m-%d %H:%M:%S') if dt else hora_raw,
-                'duration':      dur_raw,
-                'externalid':    '',
-                'local_dt':      dt,
-                'duration_secs': dur_secs,
-            })
-        if result:
-            result[-1]['_dx_total'] = dx_count
-            result[-1]['_cx_total'] = cx_count
-        return result
-    except Exception:
-        return []
