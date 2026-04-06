@@ -69,7 +69,6 @@ with col_copy:
 
 # ── UPLOAD ────────────────────────────────────────────────────────────────────
 if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
-if 'ch_key' not in st.session_state:       st.session_state.ch_key = 0
 
 up_col, clr_col = st.columns([5, 1])
 with up_col:
@@ -179,21 +178,13 @@ CH_FORMAT = {'catv':'CATV','tvd':'TVD','latam':'Pasiones Latam',
              'us':'Pasiones US','tn':'Fast Todonovelas'}
 CH_FORMAT.update({code: f'{code} {SONY_EMOJI.get(code,"📺")} {SONY_CHANNEL_MAP.get(code,code)}' for code in sony_codes_present})
 
-ch_col, ch_clr_col = st.columns([5, 1])
-with ch_col:
-    if all_options:
-        selected_all = st.multiselect(
-            t('channels'), options=all_options, default=all_options,
-            format_func=lambda x: CH_FORMAT.get(x, x),
-            key=f'ch_sel_{st.session_state.ch_key}'
-        )
-    else:
-        selected_all = []
-with ch_clr_col:
-    st.write('')
-    if st.button('✖ Clear channels', use_container_width=True):
-        st.session_state.ch_key += 1
-        st.rerun()
+if all_options:
+    selected_all = st.multiselect(
+        t('channels'), options=all_options, default=all_options,
+        format_func=lambda x: CH_FORMAT.get(x, x)
+    )
+else:
+    selected_all = []
 selected        = [x for x in selected_all if x in available]
 selected_sony   = [x for x in selected_all if x in sony_codes_present]
 
@@ -409,11 +400,38 @@ if st.button(t('run'), type='primary', use_container_width=True):
             e_lines.append(f'  {ch_lbl} — {d_str}')
         st.warning('\n'.join(e_lines))
 
-    # ── Not Ingested only (expander — no rerun/glitch)
+    # ── Not Ingested only (expander with channel filter + download)
     with st.expander('🔍 Not Ingested only' if lang=='en' else '🔍 Solo No Ingestados'):
-        _ni = [l for l in full_text.splitlines()
-               if any(s in l for s in ['NOT INGESTED','NO INGESTADO','CHANNEL:','DATE:','CANAL:','FECHA:','═══'])]
-        st.text('\n'.join(_ni) if _ni else ('None found.' if lang=='en' else 'Ninguno encontrado.'))
+        # Build per-channel NI text from full report
+        _ni_by_ch = {}
+        _cur_ch = None
+        for _line in full_text.splitlines():
+            if _line.startswith('CHANNEL:') or _line.startswith('CANAL:'):
+                _cur_ch = _line
+            if 'NOT INGESTED' in _line or 'NO INGESTADO' in _line:
+                if _cur_ch not in _ni_by_ch: _ni_by_ch[_cur_ch] = []
+                _ni_by_ch[_cur_ch].append(_line)
+        if _ni_by_ch:
+            _ni_opts = list(_ni_by_ch.keys())
+            _ni_sel  = st.multiselect(
+                'Filter by channel' if lang=='en' else 'Filtrar por canal',
+                options=_ni_opts, default=_ni_opts,
+                format_func=lambda x: x.replace('CHANNEL: ','').replace('CANAL: ',''),
+                key='ni_ch_filter')
+            _ni_lines = []
+            for _ch in _ni_sel:
+                _ni_lines.append(_ch)
+                _ni_lines += _ni_by_ch[_ch]
+                _ni_lines.append('')
+            _ni_text = '\n'.join(_ni_lines)
+            st.text(_ni_text)
+            st.download_button(
+                '⬇ Download Not Ingested (.txt)' if lang=='en' else '⬇ Descargar No Ingestados (.txt)',
+                _ni_text,
+                file_name=f'not_ingested_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
+                mime='text/plain', use_container_width=True, key='dl_ni')
+        else:
+            st.write('None found.' if lang=='en' else 'Ninguno encontrado.')
 
     # Build tab structure: All + per-date (regular + Sony mixed) + dedicated Sony tabs
     CH_DISPLAY2 = {**CH_DISPLAY,
