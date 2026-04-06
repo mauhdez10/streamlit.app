@@ -1274,87 +1274,44 @@ def check_cue_tones(playlist, lang='en'):
 
 def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
     """
-    TN program check: Counter-based, grilla anchored to partial window.
-    - Counts only seg_num==1 program entries (first segment of each airing).
-    - For partial playlists: grilla is sliced starting from the first episode
-      that appears in the JSON window, so pre-window airings are ignored on
-      both sides (not flagged as missing).
+    TN program check: grilla has (show_name, ep_num) pairs.
+    JSON episode info is in p['name'] field (e.g. 'GENESIS_E122').
+    Set-based: each unique episode checked once regardless of re-airs.
     """
     import re as _re
 
-    def parse_ep_num(raw_ref):
-        m = _re.search(r'_E(\d+)', str(raw_ref))
+    def parse_ep_num(name):
+        m = _re.search(r'_E(\d+)$', str(name))
         return int(m.group(1)) if m else None
 
-    # JSON counter: seg_num==1 only, from current_start onward
-    json_counter = Counter()
-    json_first   = {}
+    # Unique episode numbers from grilla
+    grilla_eps = {}
+    for show_name, ep_num in grilla_pairs:
+        if ep_num not in grilla_eps:
+            grilla_eps[ep_num] = show_name
+
+    # Unique episodes from JSON — use p['name'] which has e.g. 'GENESIS_E122'
+    seen, json_eps = set(), {}
     for p in playlist['programs']:
-        if current_start and p['start'] and p['start'] < current_start:
-            continue
-        if p.get('seg_num', 1) != 1:
-            continue
-        ep_num = parse_ep_num(p['episode_id_raw'])
+        ref = p['episode_id_raw']
+        if ref in seen: continue
+        seen.add(ref)
+        if current_start and p['start'] and p['start'] < current_start: continue
+        ep_num = parse_ep_num(p['name'])
         if ep_num is not None:
-            json_counter[ep_num] += 1
-            if ep_num not in json_first:
-                json_first[ep_num] = p
-
-    # Anchor grilla: slice from the position matching the first JSON episode
-    grilla_slice = list(grilla_pairs)
-    anchor_label = None
-    if current_start and json_counter:
-        # Ordered first episode in JSON window
-        first_ep = next((parse_ep_num(p['episode_id_raw'])
-                         for p in playlist['programs']
-                         if (not p['start'] or p['start'] >= current_start)
-                         and p.get('seg_num', 1) == 1
-                         and parse_ep_num(p['episode_id_raw']) is not None), None)
-        if first_ep is not None:
-            # Count how many times this episode aired BEFORE current_start
-            pre = sum(1 for p in playlist['programs']
-                      if parse_ep_num(p['episode_id_raw']) == first_ep
-                      and p.get('seg_num', 1) == 1
-                      and p['start'] and p['start'] < current_start)
-            # Find the (pre+1)th occurrence in grilla
-            seen = 0
-            for i, (name, ep) in enumerate(grilla_slice):
-                if ep == first_ep:
-                    if seen == pre:
-                        grilla_slice  = grilla_slice[i:]
-                        anchor_label  = f'{name} ep{first_ep}'
-                        break
-                    seen += 1
-
-    grilla_counter = Counter(ep for _, ep in grilla_slice if ep is not None)
-    grilla_names   = {ep: name for name, ep in grilla_slice if ep is not None}
+            json_eps[ep_num] = {'name': p['name'], 'start': p['start']}
 
     issues = []
-    if anchor_label:
-        issues.append(T('anchored', lang, i=1, id=anchor_label))
-
-    all_eps = sorted(set(grilla_counter) | set(json_counter))
-    for ep in all_eps:
-        gc   = grilla_counter.get(ep, 0)
-        jc   = json_counter.get(ep, 0)
-        show = grilla_names.get(ep, f'ep{ep}')
-        info = json_first.get(ep, {})
-        if gc == jc:
-            continue
-        if gc > jc:
-            diff   = gc - jc
-            suffix = f' ({diff}x missing, grilla={gc} playlist={jc})' if diff > 1 else ''
-            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}{suffix}')
-        else:
-            diff   = jc - gc
-            t_str  = fmt_t(info.get('start')) if info.get('start') else '?'
-            suffix = f' ({diff}x extra, grilla={gc} playlist={jc})' if diff > 1 else ''
-            ep_id  = info.get('episode_id', f'ep{ep}')
-            issues.append(f'  ✗  EXTRA IN PLAYLIST: {ep_id} @ {t_str} (not in grilla){suffix}')
-
-    if not any('✗' in i for i in issues):
-        issues.append(f'  ✓  All {len(grilla_counter)} episodes match grilla')
+    for ep, show in sorted(grilla_eps.items()):
+        if ep not in json_eps:
+            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}')
+    for ep, info in sorted(json_eps.items()):
+        if ep not in grilla_eps:
+            issues.append(f'  ✗  EXTRA IN PLAYLIST: {info["name"]} @ {fmt_t(info["start"])} (not in grilla)')
+    if not issues:
+        issues.append(f'  ✓  All {len(json_eps)} episodes match grilla')
     return issues
+
 
 def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None):
     sep = '═' * 60

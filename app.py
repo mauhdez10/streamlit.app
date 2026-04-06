@@ -13,7 +13,7 @@ from checker import (
     parse_sony_json_markers
 )
 
-APP_VERSION = "v30"
+APP_VERSION = "v30.5"
 
 st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
 
@@ -62,8 +62,9 @@ with col_title:
     st.title(t('title'))
 with col_copy:
     st.markdown(
-        f'<div style="text-align:right;padding-top:20px;font-size:0.75rem;color:#888;">'
-        f'© 2026 Mauricio Hernandez<br>{APP_VERSION}</div>',
+        f'<div style="text-align:right;padding-top:16px;">'
+        f'<span style="font-size:1.05rem;font-weight:700;color:#444;">© 2026 Mauricio Hernandez</span><br>'
+        f'<span style="font-size:0.85rem;color:#888;">{APP_VERSION}</span></div>',
         unsafe_allow_html=True)
 
 # ── UPLOAD ────────────────────────────────────────────────────────────────────
@@ -408,15 +409,11 @@ if st.button(t('run'), type='primary', use_container_width=True):
             e_lines.append(f'  {ch_lbl} — {d_str}')
         st.warning('\n'.join(e_lines))
 
-    # ── Not Ingested only filter
-    show_ni_only = st.checkbox(
-        '🔍 Show Not Ingested only' if lang == 'en' else '🔍 Mostrar solo No Ingestados',
-        value=False)
-    if show_ni_only:
-        ni_lines = [l for l in full_text.splitlines()
-                    if any(s in l for s in ['NOT INGESTED', 'NO INGESTADO', 'CHANNEL:', 'DATE:', 'CANAL:', 'FECHA:', '═'])]
-        st.text('\n'.join(ni_lines))
-        st.stop()
+    # ── Not Ingested only (expander — no rerun/glitch)
+    with st.expander('🔍 Not Ingested only' if lang=='en' else '🔍 Solo No Ingestados'):
+        _ni = [l for l in full_text.splitlines()
+               if any(s in l for s in ['NOT INGESTED','NO INGESTADO','CHANNEL:','DATE:','CANAL:','FECHA:','═══'])]
+        st.text('\n'.join(_ni) if _ni else ('None found.' if lang=='en' else 'Ninguno encontrado.'))
 
     # Build tab structure: All + per-date (regular + Sony mixed) + dedicated Sony tabs
     CH_DISPLAY2 = {**CH_DISPLAY,
