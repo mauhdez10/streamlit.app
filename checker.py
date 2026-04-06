@@ -113,9 +113,13 @@ def is_episode_id(val):
     val = val.strip()
     if ' ' in val or len(val) < 3 or len(val) > 16: return False
     if not re.match(r'^[A-Z]', val): return False
-    if len(re.findall(r'\d', val)) >= 3: return True
-    if re.match(r'^[A-Z]{3,8}$', val): return True
-    return False
+    return len(re.findall(r'\d', val)) >= 3
+
+def is_movie_id(val):
+    """Movie/special IDs: pure uppercase alpha, 3-8 chars. MARCE, NELQP, CAME."""
+    if not val or not isinstance(val, str): return False
+    val = val.strip()
+    return bool(re.match(r'^[A-Z]{3,8}$', val))
 
 def normalize_id(ep_id):
     if not ep_id: return ''
@@ -405,7 +409,12 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
         val = resolve_cell(val)
         if not val or not isinstance(val, str) or val.startswith('='): return []
         val = val.strip()
+        # Full cell is an episode ID (standard with digits)
         if is_episode_id(val): return [normalize_id(val)]
+        # Full cell is a movie/special ID (pure alpha, no digits)
+        if is_movie_id(val): return [normalize_id(val)]
+        # Cell has mixed content — tokenize and extract only standard IDs (digits required)
+        # Do NOT apply movie_id check on tokens to avoid extracting description words
         tokens = re.findall(r'[A-Z0-9]+', val.upper())
         return [normalize_id(t) for t in tokens if is_episode_id(t)]
 
@@ -886,11 +895,14 @@ def check_programs_vs_grilla(playlist, grilla_ids, current_start, lang):
         pfx_g = show_prefix(gid)
         pfx_p = show_prefix(pid)
 
-        # Same prefix OR one starts with other → wrong episode
-        # Handles: COSA0326 vs COSA0402, and MARCE vs MARCELO
+        # Same prefix → wrong episode (COSA0326 vs COSA0402)
+        # For movie IDs (pure alpha like MARCE): also catch MARCE vs MARCELO
+        is_movie_g = bool(re.match(r'^[A-Z]{3,8}$', gid))
+        is_movie_p = bool(re.match(r'^[A-Z]{3,8}$', pid))
         pfx_match = (pfx_g and pfx_p and (
             pfx_g == pfx_p or
-            pfx_g.startswith(pfx_p) or pfx_p.startswith(pfx_g)
+            ((is_movie_g or is_movie_p) and
+             (pfx_g.startswith(pfx_p) or pfx_p.startswith(pfx_g)))
         ))
         if pfx_match:
             issues.append(T('wrong_ep', lang, g=gid, p=pid, t=fmt_t(p['start'])))
@@ -2182,8 +2194,8 @@ def pick_grilla_for_date(grilla_list, target_date, channel):
     pick the one whose week contains target_date.
     Returns (file, warning_string). warning_string is None if match found.
     """
-    if not grilla_list: return None
-    if len(grilla_list) == 1: return grilla_list[0]
+    if not grilla_list: return None, None
+    if len(grilla_list) == 1: return grilla_list[0], None
 
     from openpyxl import load_workbook
     import io
