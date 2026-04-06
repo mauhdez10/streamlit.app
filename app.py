@@ -1,7 +1,6 @@
 """
-Broadcast Playlist Checker — Streamlit App v30.5
+Broadcast Playlist Checker — Streamlit App v6
 """
-APP_VERSION = "v30.5"
 import streamlit as st
 import json
 from datetime import datetime
@@ -13,6 +12,8 @@ from checker import (
     parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP,
     parse_sony_json_markers
 )
+
+APP_VERSION = "v30"
 
 st.set_page_config(page_title='Broadcast Playlist Checker', layout='wide')
 
@@ -56,18 +57,19 @@ L = {
 }
 def t(k): return L[k][lang]
 
-col_t, col_c = st.columns([3, 1])
-with col_t:
+col_title, col_copy = st.columns([3, 1])
+with col_title:
     st.title(t('title'))
-with col_c:
+with col_copy:
     st.markdown(
-        f'<div style="text-align:right;padding-top:16px;">'
-        f'<span style="font-size:1.05rem;font-weight:700;color:#444;">© 2026 Mauricio Hernandez</span><br>'
-        f'<span style="font-size:0.85rem;color:#888;">{APP_VERSION}</span></div>',
+        f'<div style="text-align:right;padding-top:20px;font-size:0.75rem;color:#888;">'
+        f'© 2026 Mauricio Hernandez<br>{APP_VERSION}</div>',
         unsafe_allow_html=True)
 
 # ── UPLOAD ────────────────────────────────────────────────────────────────────
 if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
+if 'ch_key' not in st.session_state:       st.session_state.ch_key = 0
+
 up_col, clr_col = st.columns([5, 1])
 with up_col:
     uploaded = st.file_uploader(t('upload'), accept_multiple_files=True, type=None,
@@ -81,14 +83,19 @@ result = detect_files(uploaded) if uploaded else ({}, {}, [], [])
 days, grillas, unknown_files, sony_files_raw = result
 
 # ── DETECTION TABLE ───────────────────────────────────────────────────────────
+# Count detected vs total
+total_uploaded = len(uploaded) if uploaded else 0
+total_detected = 0
 if uploaded:
     total_detected = (
-        sum(len(info['json']) + (1 if info.get('xml') else 0) for info in days.values())
+        sum(len(info['json']) + (1 if info.get('xml') else 0)
+            for info in days.values())
         + sum(len(gl) if isinstance(gl, list) else 1 for gl in grillas.values())
         + len(sony_files_raw)
     )
-    _det_lbl = 'Detected files' if lang=='en' else 'Archivos detectados'
-    st.markdown(f'**{_det_lbl}: {total_detected} / {len(uploaded)} uploaded**')
+
+if uploaded:
+    st.markdown(f"**{'Detected files' if lang=='en' else 'Archivos detectados'}: {total_detected} / {total_uploaded} uploaded**")
     CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹',
                   'us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}
     rows = []
@@ -151,10 +158,14 @@ if uploaded:
                      hide_index=True, height=min(500, 35 + len(rows)*35))
     if rows:
         import pandas as pd
-        _df = pd.DataFrame(rows)
-        n_d = _df['Date'].nunique(); n_c = _df['Channel'].nunique()
-        n_t = _df['Type'].nunique(); n_f = len(_df)
-        st.caption(f'Dates ({n_d})  ·  Channels ({n_c})  ·  Types ({n_t})  ·  Files ({n_f})')
+        df = pd.DataFrame(rows)
+        n_dates    = df["Date"].nunique()
+        n_channels = df["Channel"].nunique()
+        n_types    = df["Type"].nunique()
+        n_files    = len(df)
+        st.caption(
+            f'Dates ({n_dates})  ·  Channels ({n_channels})  ·  '
+            f'Types ({n_types})  ·  Files ({n_files})')
     st.caption(t('hint'))
     st.divider()
 
@@ -167,13 +178,21 @@ CH_FORMAT = {'catv':'CATV','tvd':'TVD','latam':'Pasiones Latam',
              'us':'Pasiones US','tn':'Fast Todonovelas'}
 CH_FORMAT.update({code: f'{code} {SONY_EMOJI.get(code,"📺")} {SONY_CHANNEL_MAP.get(code,code)}' for code in sony_codes_present})
 
-if all_options:
-    selected_all = st.multiselect(
-        t('channels'), options=all_options, default=all_options,
-        format_func=lambda x: CH_FORMAT.get(x, x)
-    )
-else:
-    selected_all = []
+ch_col, ch_clr_col = st.columns([5, 1])
+with ch_col:
+    if all_options:
+        selected_all = st.multiselect(
+            t('channels'), options=all_options, default=all_options,
+            format_func=lambda x: CH_FORMAT.get(x, x),
+            key=f'ch_sel_{st.session_state.ch_key}'
+        )
+    else:
+        selected_all = []
+with ch_clr_col:
+    st.write('')
+    if st.button('✖ Clear channels', use_container_width=True):
+        st.session_state.ch_key += 1
+        st.rerun()
 selected        = [x for x in selected_all if x in available]
 selected_sony   = [x for x in selected_all if x in sony_codes_present]
 
@@ -363,31 +382,41 @@ if st.button(t('run'), type='primary', use_container_width=True):
             all_lines += lines
     full_text = '\n'.join(all_lines)
 
+    # ── Manual review warnings
     if all_manual_warns:
         warn_header = '⚠ MANUAL REVIEW NEEDED:' if lang == 'en' else '⚠ REVISIÓN MANUAL REQUERIDA:'
         warn_lines = [warn_header]
         for ch_lbl, d_str, cnt in all_manual_warns:
-            warn_lines.append(f'')
+            warn_lines.append('')
             warn_lines.append(f'  {ch_lbl}  —  {d_str}')
             warn_lines.append(f'    {cnt} commercial block{"s" if cnt>1 else ""} need manual review')
         st.error('\n'.join(warn_lines))
 
     # ── Empty report detection
-    _empty = []
-    for _ds in sorted_dates:
-        for _ch, _lines in day_reports.get(_ds, {}).get('channels', {}).items():
-            if not any(s in '\n'.join(_lines) for s in ['SUMMARY','PROGRAM CHECK','COMMERCIAL CHECK','PROMO']):
-                _empty.append((CH_DISPLAY.get(_ch, _ch), _ds))
-    if _empty:
-        _el = ['ℹ  ' + ('Empty Reports:' if lang=='en' else 'Reportes Vacíos:')]
-        for _cl, _d in _empty: _el.append(f'  {_cl} — {_d}')
-        st.warning('\n'.join(_el))
+    empty_reports = []
+    for date_str in sorted_dates:
+        ch_rpts = day_reports.get(date_str, {}).get('channels', {})
+        for ch, lines in ch_rpts.items():
+            text = '\n'.join(lines)
+            has_content = any(s in text for s in ['SUMMARY', 'PROGRAM CHECK', 'COMMERCIAL CHECK'])
+            if not has_content:
+                empty_reports.append((CH_DISPLAY.get(ch, ch), date_str))
+    if empty_reports:
+        empty_lbl = 'Empty Reports:' if lang == 'en' else 'Reportes Vacíos:'
+        e_lines = [f'ℹ  {empty_lbl}']
+        for ch_lbl, d_str in empty_reports:
+            e_lines.append(f'  {ch_lbl} — {d_str}')
+        st.warning('\n'.join(e_lines))
 
-    # ── Not Ingested only (expander — no rerun)
-    with st.expander('🔍 Not Ingested only' if lang=='en' else '🔍 Solo No Ingestados'):
-        _ni = [l for l in full_text.splitlines()
-               if any(s in l for s in ['NOT INGESTED','NO INGESTADO','CHANNEL:','DATE:','CANAL:','FECHA:','═══'])]
-        st.text('\n'.join(_ni) if _ni else ('None found.' if lang=='en' else 'Ninguno encontrado.'))
+    # ── Not Ingested only filter
+    show_ni_only = st.checkbox(
+        '🔍 Show Not Ingested only' if lang == 'en' else '🔍 Mostrar solo No Ingestados',
+        value=False)
+    if show_ni_only:
+        ni_lines = [l for l in full_text.splitlines()
+                    if any(s in l for s in ['NOT INGESTED', 'NO INGESTADO', 'CHANNEL:', 'DATE:', 'CANAL:', 'FECHA:', '═'])]
+        st.text('\n'.join(ni_lines))
+        st.stop()
 
     # Build tab structure: All + per-date (regular + Sony mixed) + dedicated Sony tabs
     CH_DISPLAY2 = {**CH_DISPLAY,
