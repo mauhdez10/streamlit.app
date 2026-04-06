@@ -373,13 +373,15 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
     from openpyxl import load_workbook
     import io
     if isinstance(filepath_or_bytes, str):
-        wb = load_workbook(filepath_or_bytes, read_only=True)
+        wb = load_workbook(filepath_or_bytes, read_only=False)
     else:
         raw = filepath_or_bytes.read() if hasattr(filepath_or_bytes, 'read') else filepath_or_bytes
-        wb = load_workbook(io.BytesIO(raw), read_only=True)
+        wb = load_workbook(io.BytesIO(raw), read_only=False)
 
     ws = wb.active
-    all_rows = list(ws.iter_rows(values_only=True))
+    # Keep two views: values_only for formulas, full rows for bold detection
+    all_rows_full = list(ws.iter_rows(values_only=False))
+    all_rows = [[cell.value for cell in row] for row in all_rows_full]
     if len(all_rows) < 2: return []
 
     header_row = all_rows[1]
@@ -419,11 +421,14 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
         return [normalize_id(t) for t in tokens if is_episode_id(t)]
 
     episode_ids = []
-    for row in all_rows[2:]:
+    for ri, row in enumerate(all_rows[2:], start=2):
         val = row[target_col] if target_col < len(row) else None
-        # Safety net: skip rows where the target-date cell is empty or non-ID
-        # (handles extra ET header rows that clients sometimes add mid-grid)
         if val is None: continue
+        # Only extract bold cells — bold = show ID, non-bold = description text
+        full_row = all_rows_full[ri] if ri < len(all_rows_full) else []
+        cell = full_row[target_col] if target_col < len(full_row) else None
+        is_bold = (cell is not None and cell.font is not None and cell.font.bold)
+        if not is_bold: continue
         for ep in extract_ids(val):
             if ep: episode_ids.append(ep)
     return episode_ids
@@ -1359,6 +1364,61 @@ def check_programs_vs_grilla_pasiones(playlist, grilla_ids, current_start, lang)
         issues.append(f'  {T("ok_programs", lang)}')
     return issues
 
+
+
+def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
+    """
+    TN program check using Counter on integer episode numbers.
+    grilla_pairs: list of (show_name, ep_num_int) from _parse_grilla_tn.
+    Counts show-BLOCKS (not segments) using build_show_sequence which already
+    collapses consecutive same-ID segments into one entry.
+    Compares occurrence counts so re-airs are checked individually.
+    """
+    import re as _re
+
+    def parse_ep_num(ep_id):
+        m = _re.search(r'_E(\d+)$', str(ep_id))
+        return int(m.group(1)) if m else None
+
+    # Grilla counter: ep_num (int) -> count of scheduled airings
+    grilla_counter = Counter(ep_num for _, ep_num in grilla_pairs if ep_num is not None)
+    grilla_names   = {ep_num: show_name for show_name, ep_num in grilla_pairs if ep_num is not None}
+
+    # JSON counter: use build_show_sequence to get block-level sequence (segments collapsed)
+    seq = build_show_sequence(playlist['programs'], from_start=current_start)
+    json_counter = Counter()
+    json_first   = {}
+    for item in seq:
+        ep_num = parse_ep_num(item['id'])
+        if ep_num is not None:
+            json_counter[ep_num] += 1
+            if ep_num not in json_first:
+                json_first[ep_num] = item
+
+    issues = []
+    all_eps = sorted(set(grilla_counter) | set(json_counter))
+    for ep in all_eps:
+        gc = grilla_counter.get(ep, 0)
+        jc = json_counter.get(ep, 0)
+        show = grilla_names.get(ep, f'ep{ep}')
+        info = json_first.get(ep, {})
+        if gc == jc:
+            continue
+        if gc > jc:
+            diff = gc - jc
+            suffix = f' ({diff}x missing, grilla={gc} playlist={jc})' if diff > 1 else ''
+            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}{suffix}')
+        else:
+            diff = jc - gc
+            t_str = fmt_t(info.get('start')) if info.get('start') else '?'
+            suffix = f' ({diff}x extra, grilla={gc} playlist={jc})' if diff > 1 else ''
+            issues.append(
+                f'  ✗  EXTRA IN PLAYLIST: {info.get("id", f"ep{ep}")} @ {t_str} (not in grilla){suffix}')
+
+    if not issues:
+        issues.append(f'  ✓  All {len(grilla_counter)} episodes match grilla')
+    return issues
+
 def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None):
     sep = '═' * 60
     pt  = playlist['type']
@@ -1384,7 +1444,9 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
 
     lines.append(f'── [1] {T("section_programs",lang)} ──')
     prog_lines = []
-    if not grilla_ids:
+    if is_tn and grilla_ids:
+        prog_lines = check_programs_vs_grilla_tn(playlist, grilla_ids, current_start, lang)
+    elif not grilla_ids:
         prog_lines = [T('no_grilla', lang)]
     else:
         prog_lines = check_programs_vs_grilla(playlist, grilla_ids, current_start, lang)
