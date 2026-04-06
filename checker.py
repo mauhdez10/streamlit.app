@@ -385,16 +385,37 @@ def _parse_grilla_catv_tvd(filepath_or_bytes, target_date):
     if len(all_rows) < 2: return []
 
     header_row = all_rows[1]
-    target_col = None
-    try:
-        monday_val = header_row[2]
-        monday = monday_val.date() if hasattr(monday_val, 'date') else None
-        if monday:
-            for offset in range(7):
-                if monday + timedelta(days=offset) == target_date:
-                    target_col = 2 + offset; break
-    except: pass
-    if target_col is None: target_col = 2 + target_date.weekday()
+    # Build date→col map, skipping ET/UTC/CA marker columns
+    _NON_DATE = {'ET', 'UTC', 'CA', 'E.T.', 'U.T.C.'}
+    date_col_map = {}
+    for ci, val in enumerate(header_row):
+        if val is None: continue
+        if isinstance(val, str) and val.strip().upper() in _NON_DATE: continue
+        if hasattr(val, 'date'):
+            date_col_map[val.date()] = ci
+        elif isinstance(val, str) and val.strip().startswith('='):
+            # Formula like =C2+5 — resolve base date + offset
+            m2 = re.match(r'^=([A-Z]+)(\d+)\+(\d+)$', val.strip())
+            if m2:
+                try:
+                    base_ci = sum((ord(c)-ord('A')+1)*(26**i)
+                                 for i,c in enumerate(reversed(m2.group(1))))-1
+                    base_ri = int(m2.group(2))-1
+                    base_v  = all_rows[base_ri][base_ci] if base_ri < len(all_rows) and base_ci < len(all_rows[base_ri]) else None
+                    if base_v and hasattr(base_v, 'date'):
+                        date_col_map[(base_v + timedelta(days=int(m2.group(3)))).date()] = ci
+                except Exception:
+                    pass
+    target_col = date_col_map.get(target_date)
+    if target_col is None and date_col_map:
+        # Fallback: find Monday and walk by weekday offset
+        monday_d = min(date_col_map.keys())
+        monday_c = date_col_map[monday_d]
+        for offset in range(7):
+            if monday_d + timedelta(days=offset) == target_date:
+                target_col = monday_c + offset; break
+    if target_col is None:
+        return []
 
     def resolve_cell(val):
         if not val or not isinstance(val, str): return val
@@ -1253,202 +1274,86 @@ def check_cue_tones(playlist, lang='en'):
 
 def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
     """
-    TN program check: grilla has (show_name, ep_num) pairs (including re-airs).
-    Uses Counter comparison to catch re-air issues (e.g. segment appearing twice
-    in log when it should appear once, or vice versa).
-    """
-    import re as _re
-
-    def parse_ep_num(name):
-        m = _re.search(r'_E(\d+)$', str(name))
-        return int(m.group(1)) if m else None
-
-    # Count occurrences in grilla (preserves re-airs)
-    grilla_counter = Counter(ep_num for _, ep_num in grilla_pairs if ep_num is not None)
-    grilla_names   = {ep_num: show_name for show_name, ep_num in grilla_pairs if ep_num is not None}
-
-    # Count occurrences in JSON (preserves re-airs)
-    json_counter = Counter()
-    json_first   = {}  # ep_num -> first occurrence info
-    for p in playlist['programs']:
-        if current_start and p['start'] and p['start'] < current_start: continue
-        ep_num = parse_ep_num(p['name'])
-        if ep_num is not None:
-            json_counter[ep_num] += 1
-            if ep_num not in json_first:
-                json_first[ep_num] = {'name': p['name'], 'start': p['start']}
-
-    issues = []
-    all_eps = sorted(set(grilla_counter) | set(json_counter))
-    for ep in all_eps:
-        gc = grilla_counter.get(ep, 0)
-        jc = json_counter.get(ep, 0)
-        show = grilla_names.get(ep, f'ep{ep}')
-        info = json_first.get(ep, {})
-        if gc > jc:
-            diff = gc - jc
-            issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}' +
-                          (f' ({diff}x missing, grilla={gc} playlist={jc})' if diff > 1 else ''))
-        elif jc > gc:
-            diff = jc - gc
-            t_str = fmt_t(info.get('start')) if info.get('start') else '?'
-            issues.append(f'  ✗  EXTRA IN PLAYLIST: {info.get("name", f"ep{ep}")} @ {t_str} (not in grilla)' +
-                          (f' ({diff}x extra, grilla={gc} playlist={jc})' if diff > 1 else ''))
-
-    if not issues:
-        issues.append(f'  ✓ All {len(json_eps)} episodes match grilla')
-    return issues
-
-
-
-
-def check_programs_vs_grilla_pasiones(playlist, grilla_ids, current_start, lang):
-    """
-    Pasiones program check: grilla lists each show ONCE per day.
-    Playlist re-airs the same episodes multiple times — this is expected.
-    Logic:
-      - Every grilla episode must appear at least once in playlist → else NOT IN PLAYLIST
-      - EXTRA = playlist has an episode whose PREFIX does not appear in grilla at all
-      - Wrong episode = same prefix in grilla, different number in playlist
-    Re-airs of grilla episodes are NOT flagged as EXTRA.
-    """
-    is_partial = current_start is not None
-    part_seq   = build_show_sequence(playlist['programs'], from_start=current_start)
-
-    if not grilla_ids:
-        return [T('no_grilla', lang)]
-
-    # Anchor for partial playlists
-    if is_partial and part_seq:
-        first_id  = part_seq[0]['id']
-        first_pfx = show_prefix(first_id)
-        anchor = 0
-        for i, gid in enumerate(grilla_ids):
-            if gid == first_id or (first_pfx and show_prefix(gid) == first_pfx):
-                anchor = i; break
-        issues = [T('anchored', lang, i=anchor+1, id=grilla_ids[anchor] if grilla_ids else '?')]
-        grilla_slice = grilla_ids[anchor:]
-    else:
-        grilla_slice = grilla_ids[:]
-        issues = []
-
-    grilla_set     = set(grilla_slice)
-    grilla_prefixes = {show_prefix(g) for g in grilla_slice}
-    pl_set          = {p['id'] for p in part_seq}
-    pl_counter      = Counter(p['id'] for p in part_seq)
-
-    # Check each grilla entry — must appear at least once in playlist
-    for gid in grilla_slice:
-        if gid in pl_set:
-            continue  # found (any occurrence) ✓
-        pfx = show_prefix(gid)
-        same_pfx = [p for p in part_seq if show_prefix(p['id']) == pfx and p['id'] != gid]
-        if same_pfx:
-            issues.append(T('wrong_ep', lang, g=gid, p=same_pfx[0]['id'], t=fmt_t(same_pfx[0]['start'])))
-        elif is_partial and any(p['episode_id'] == gid for p in playlist['programs']
-                                if p['start'] and p['start'] < current_start):
-            issues.append(T('already_aired', lang, id=gid))
-        else:
-            issues.append(T('not_in_pl', lang, id=gid))
-
-    # EXTRA = show whose PREFIX does not appear anywhere in the grilla
-    reported_extra = set()
-    for p in part_seq:
-        pid = p['id']
-        pfx = show_prefix(pid)
-        if pfx not in grilla_prefixes and pid not in reported_extra:
-            issues.append(T('extra_pl', lang, id=pid, t=fmt_t(p['start'])))
-            reported_extra.add(pid)
-
-    if not any(x.strip().startswith(('✗', '⚠', '↔')) for x in issues):
-        issues.append(f'  {T("ok_programs", lang)}')
-    return issues
-
-
-
-def check_programs_vs_grilla_tn(playlist, grilla_pairs, current_start, lang):
-    """
-    TN program check using Counter on integer episode numbers.
-    For partial playlists: anchors grilla_pairs to the partial start position
-    so we only compare the portion of the grilla that matches the checked window.
-    Counts show-BLOCKS not segments (first segment only via seg_num==1).
+    TN program check: Counter-based, grilla anchored to partial window.
+    - Counts only seg_num==1 program entries (first segment of each airing).
+    - For partial playlists: grilla is sliced starting from the first episode
+      that appears in the JSON window, so pre-window airings are ignored on
+      both sides (not flagged as missing).
     """
     import re as _re
 
     def parse_ep_num(raw_ref):
-        """Extract episode number from TN raw ref like GENESIS_E122_1 or GENESIS_E122."""
         m = _re.search(r'_E(\d+)', str(raw_ref))
         return int(m.group(1)) if m else None
 
-    # JSON counter: count first-segment occurrences only (one per airing)
+    # JSON counter: seg_num==1 only, from current_start onward
     json_counter = Counter()
     json_first   = {}
     for p in playlist['programs']:
         if current_start and p['start'] and p['start'] < current_start:
             continue
         if p.get('seg_num', 1) != 1:
-            continue  # skip non-first segments
+            continue
         ep_num = parse_ep_num(p['episode_id_raw'])
         if ep_num is not None:
             json_counter[ep_num] += 1
             if ep_num not in json_first:
                 json_first[ep_num] = p
 
-    # Anchor grilla_pairs: for partial playlists, skip grilla entries before
-    # the partial window start. Mirrors the LCS anchor logic for CATV/TVD.
+    # Anchor grilla: slice from the position matching the first JSON episode
     grilla_slice = list(grilla_pairs)
-    if current_start:
-        # Find first episode in the JSON window (first seg_num==1 after current_start)
-        first_json_ep = next((parse_ep_num(p['episode_id_raw'])
-                              for p in playlist['programs']
-                              if (not p['start'] or p['start'] >= current_start)
-                              and p.get('seg_num', 1) == 1
-                              and parse_ep_num(p['episode_id_raw']) is not None), None)
-        if first_json_ep is not None:
-            # Count how many times this ep appeared BEFORE current_start
-            pre_count = sum(1 for p in playlist['programs']
-                            if parse_ep_num(p['episode_id_raw']) == first_json_ep
-                            and p.get('seg_num', 1) == 1
-                            and p['start'] and p['start'] < current_start)
-            # Find the (pre_count+1)th occurrence of first_json_ep in grilla
-            anchor, found_count = 0, 0
-            for i, (_, ep) in enumerate(grilla_slice):
-                if ep == first_json_ep:
-                    if found_count == pre_count:
-                        anchor = i; break
-                    found_count += 1
-            grilla_slice = grilla_slice[anchor:]
+    anchor_label = None
+    if current_start and json_counter:
+        # Ordered first episode in JSON window
+        first_ep = next((parse_ep_num(p['episode_id_raw'])
+                         for p in playlist['programs']
+                         if (not p['start'] or p['start'] >= current_start)
+                         and p.get('seg_num', 1) == 1
+                         and parse_ep_num(p['episode_id_raw']) is not None), None)
+        if first_ep is not None:
+            # Count how many times this episode aired BEFORE current_start
+            pre = sum(1 for p in playlist['programs']
+                      if parse_ep_num(p['episode_id_raw']) == first_ep
+                      and p.get('seg_num', 1) == 1
+                      and p['start'] and p['start'] < current_start)
+            # Find the (pre+1)th occurrence in grilla
+            seen = 0
+            for i, (name, ep) in enumerate(grilla_slice):
+                if ep == first_ep:
+                    if seen == pre:
+                        grilla_slice  = grilla_slice[i:]
+                        anchor_label  = f'{name} ep{first_ep}'
+                        break
+                    seen += 1
 
-    grilla_counter = Counter(ep_num for _, ep_num in grilla_slice if ep_num is not None)
-    grilla_names   = {ep_num: show_name for show_name, ep_num in grilla_slice if ep_num is not None}
+    grilla_counter = Counter(ep for _, ep in grilla_slice if ep is not None)
+    grilla_names   = {ep: name for name, ep in grilla_slice if ep is not None}
 
-    if current_start and grilla_slice:
-        issues = [T('anchored', lang, i=1, id=f'ep{grilla_slice[0][1]}')]
-    else:
-        issues = []
+    issues = []
+    if anchor_label:
+        issues.append(T('anchored', lang, i=1, id=anchor_label))
 
     all_eps = sorted(set(grilla_counter) | set(json_counter))
     for ep in all_eps:
-        gc = grilla_counter.get(ep, 0)
-        jc = json_counter.get(ep, 0)
+        gc   = grilla_counter.get(ep, 0)
+        jc   = json_counter.get(ep, 0)
         show = grilla_names.get(ep, f'ep{ep}')
         info = json_first.get(ep, {})
         if gc == jc:
             continue
         if gc > jc:
-            diff = gc - jc
+            diff   = gc - jc
             suffix = f' ({diff}x missing, grilla={gc} playlist={jc})' if diff > 1 else ''
             issues.append(f'  ✗  NOT IN PLAYLIST: {show} ep{ep}{suffix}')
         else:
-            diff = jc - gc
-            t_str = fmt_t(info.get('start')) if info.get('start') else '?'
+            diff   = jc - gc
+            t_str  = fmt_t(info.get('start')) if info.get('start') else '?'
             suffix = f' ({diff}x extra, grilla={gc} playlist={jc})' if diff > 1 else ''
-            issues.append(
-                f'  ✗  EXTRA IN PLAYLIST: {info.get("episode_id", f"ep{ep}")} @ {t_str} (not in grilla){suffix}')
+            ep_id  = info.get('episode_id', f'ep{ep}')
+            issues.append(f'  ✗  EXTRA IN PLAYLIST: {ep_id} @ {t_str} (not in grilla){suffix}')
 
-    if not [i for i in issues if '✗' in i]:
-        n = len(grilla_counter)
-        issues.append(f'  ✓  All {n} episodes match grilla')
+    if not any('✗' in i for i in issues):
+        issues.append(f'  ✓  All {len(grilla_counter)} episodes match grilla')
     return issues
 
 def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=False, file_info=None):
@@ -1463,6 +1368,9 @@ def generate_report(channel, playlist, xml_rows, grilla_ids, lang='en', is_tn=Fa
              f'{T("channel",lang)}: {channel.upper()}',
              f'{T("date_lbl",lang)}: {playlist["date"]}',
              f'{T("type_lbl",lang)}: {T("full_day",lang) if pt=="full" else T("partial",lang)}']
+    # Visual indicator for partial vs full
+    if pt == 'current':
+        lines.append('▶▶▶  PARTIAL / CURRENT PLAYLIST  ◀◀◀')
     if current_start:
         lines.append(f'{T("checking_from",lang)}: {fmt_t(current_start)}')
     # Files used for this report block
