@@ -159,11 +159,17 @@ if st.button(t('run'), type='primary', use_container_width=True):
     }
 
     def process_one(channel, json_file, xml_file, grilla_file):
-        is_tn = (channel == 'tn')
-        lines = []
+        is_tn      = (channel == 'tn')
+        is_pasiones = channel in ('latam', 'us')
+        lines      = []
+        file_info  = {
+            'json':   json_file.name  if json_file   else None,
+            'xml':    xml_file.name   if xml_file    else None,
+            'grilla': grilla_file.name if grilla_file else None,
+        }
         try:
             json_file.seek(0)
-            data = json.load(json_file)
+            data     = json.load(json_file)
             playlist = parse_json_playlist(data)
         except Exception as e:
             return [f'ERROR parsing JSON: {e}'], []
@@ -172,13 +178,15 @@ if st.button(t('run'), type='primary', use_container_width=True):
             try:
                 xml_file.seek(0)
                 xml_rows = parse_xml_log_tn(xml_file) if is_tn else parse_xml_log(xml_file)
-            except Exception as e: lines.append(f'  WARNING: XML error: {e}')
+            except Exception as e:
+                lines.append(f'  WARNING: XML error: {e}')
         grilla_ids = []
         if grilla_file and playlist['date']:
             try:
                 grilla_file.seek(0)
                 grilla_ids = parse_grilla(grilla_file, playlist['date'], channel)
-            except Exception as e: lines.append(f'  WARNING: Grilla error: {e}')
+            except Exception as e:
+                lines.append(f'  WARNING: Grilla error: {e}')
         if not xml_rows and not grilla_ids:
             pi = check_promo_repeats(playlist, lang=lang)
             ch_label = CH_LABELS.get(channel, channel.upper())
@@ -189,9 +197,14 @@ if st.button(t('run'), type='primary', use_container_width=True):
             lines.append('')
             return lines, []
         ch_label = CH_LABELS.get(channel, channel.upper())
-        is_pasiones = channel in ('latam', 'us')
-        report_text, manual_warns = generate_report(ch_label, playlist, xml_rows, grilla_ids, lang, is_tn=is_tn, file_info=file_info, is_pasiones=is_pasiones)
-        lines.append(report_text)
+        try:
+            report_text, manual_warns = generate_report(
+                ch_label, playlist, xml_rows, grilla_ids, lang,
+                is_tn=is_tn, file_info=file_info, is_pasiones=is_pasiones)
+            lines.append(report_text)
+        except Exception as e:
+            lines.append(f'  ERROR generating report: {e}')
+            manual_warns = []
         return lines, manual_warns
 
     # Build per-day reports
