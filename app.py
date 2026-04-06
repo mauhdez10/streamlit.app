@@ -56,13 +56,13 @@ L = {
 }
 def t(k): return L[k][lang]
 
-col_title, col_copy = st.columns([3, 1])
-with col_title:
+col_t, col_c = st.columns([3, 1])
+with col_t:
     st.title(t('title'))
-with col_copy:
+with col_c:
     st.markdown(
         f'<div style="text-align:right;padding-top:16px;">'
-        f'<span style="font-size:1rem;font-weight:600;color:#555;">© 2026 Mauricio Hernandez</span><br>'
+        f'<span style="font-size:1.05rem;font-weight:700;color:#444;">© 2026 Mauricio Hernandez</span><br>'
         f'<span style="font-size:0.85rem;color:#888;">{APP_VERSION}</span></div>',
         unsafe_allow_html=True)
 
@@ -82,15 +82,13 @@ days, grillas, unknown_files, sony_files_raw = result
 
 # ── DETECTION TABLE ───────────────────────────────────────────────────────────
 if uploaded:
-    file_count = len(uploaded)
-    count_label = f'{file_count} archivo{"s" if file_count != 1 else ""}' if lang == 'es' else f'{file_count} file{"s" if file_count != 1 else ""}'
     total_detected = (
         sum(len(info['json']) + (1 if info.get('xml') else 0) for info in days.values())
         + sum(len(gl) if isinstance(gl, list) else 1 for gl in grillas.values())
         + len(sony_files_raw)
     )
-    det_label = 'Detected files' if lang=='en' else 'Archivos detectados'
-    st.markdown(f'**{det_label}: {total_detected} / {len(uploaded)} uploaded**')
+    _det_lbl = 'Detected files' if lang=='en' else 'Archivos detectados'
+    st.markdown(f'**{_det_lbl}: {total_detected} / {len(uploaded)} uploaded**')
     CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹',
                   'us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}
     rows = []
@@ -109,25 +107,29 @@ if uploaded:
                          'Type': f'Log {short_date}', 'File': info['xml'].name})
 
     # For grillas, read the week-start Monday date from the file content
-    for ch_key, gf in grillas.items():
+    for ch_key, gf_list in grillas.items():
         ch = CH_DISPLAY.get(ch_key, ch_key.upper())
-        grilla_date_str = '(Week)'
-        try:
-            from openpyxl import load_workbook
-            import io
-            gf.seek(0)
-            wb = load_workbook(io.BytesIO(gf.read()), read_only=True)
-            gf.seek(0)
-            ws = wb.active
-            rows_g = list(ws.iter_rows(max_row=3, values_only=True))
-            if len(rows_g) > 1:
-                monday_val = rows_g[1][2] if len(rows_g[1]) > 2 else None
-                if monday_val and hasattr(monday_val, 'strftime'):
-                    grilla_date_str = monday_val.strftime('%m/%d')
-        except: pass
-        grilla_label = f'{"Grilla" if lang=="es" else "Grid"} {grilla_date_str}'
-        rows.append({'Date': grilla_date_str, 'Channel': ch,
-                     'Type': grilla_label, 'File': gf.name})
+        if not isinstance(gf_list, list):
+            gf_list = [gf_list]
+        for gf in gf_list:
+            grilla_date_str = '(PDF)' if gf.name.lower().endswith('.pdf') else '(Week)'
+            if not gf.name.lower().endswith('.pdf'):
+                try:
+                    from openpyxl import load_workbook
+                    import io
+                    gf.seek(0)
+                    wb = load_workbook(io.BytesIO(gf.read()), read_only=True)
+                    gf.seek(0)
+                    ws = wb.active
+                    rows_g = list(ws.iter_rows(max_row=3, values_only=True))
+                    if len(rows_g) > 1:
+                        monday_val = rows_g[1][2] if len(rows_g[1]) > 2 else None
+                        if monday_val and hasattr(monday_val, 'strftime'):
+                            grilla_date_str = monday_val.strftime('%m/%d')
+                except: pass
+            grilla_label = f'{"Grilla" if lang=="es" else "Grid"} {grilla_date_str}'
+            rows.append({'Date': grilla_date_str, 'Channel': ch,
+                         'Type': grilla_label, 'File': gf.name})
     for uf in unknown_files:
         rows.append({'Date': '?', 'Channel': '?', 'Type': '?', 'File': uf.name})
     # Sony files — use filename only, never pre-read (preserves file state for pairing)
@@ -150,11 +152,9 @@ if uploaded:
     if rows:
         import pandas as pd
         _df = pd.DataFrame(rows)
-        n_dates    = _df['Date'].nunique()
-        n_channels = _df['Channel'].nunique()
-        n_types    = _df['Type'].nunique()
-        n_files    = len(_df)
-        st.caption(f'Dates ({n_dates})  ·  Channels ({n_channels})  ·  Types ({n_types})  ·  Files ({n_files})')
+        n_d = _df['Date'].nunique(); n_c = _df['Channel'].nunique()
+        n_t = _df['Type'].nunique(); n_f = len(_df)
+        st.caption(f'Dates ({n_d})  ·  Channels ({n_c})  ·  Types ({n_t})  ·  Files ({n_f})')
     st.caption(t('hint'))
     st.divider()
 
@@ -189,11 +189,16 @@ if st.button(t('run'), type='primary', use_container_width=True):
     }
 
     def process_one(channel, json_file, xml_file, grilla_file):
-        is_tn = (channel == 'tn')
-        lines = []
+        is_tn  = (channel == 'tn')
+        lines  = []
+        file_info  = {
+            'json':   json_file.name  if json_file   else None,
+            'xml':    xml_file.name   if xml_file    else None,
+            'grilla': grilla_file.name if grilla_file else None,
+        }
         try:
             json_file.seek(0)
-            data = json.load(json_file)
+            data     = json.load(json_file)
             playlist = parse_json_playlist(data)
         except Exception as e:
             return [f'ERROR parsing JSON: {e}'], []
@@ -202,13 +207,15 @@ if st.button(t('run'), type='primary', use_container_width=True):
             try:
                 xml_file.seek(0)
                 xml_rows = parse_xml_log_tn(xml_file) if is_tn else parse_xml_log(xml_file)
-            except Exception as e: lines.append(f'  WARNING: XML error: {e}')
+            except Exception as e:
+                lines.append(f'  WARNING: XML error: {e}')
         grilla_ids = []
         if grilla_file and playlist['date']:
             try:
                 grilla_file.seek(0)
                 grilla_ids = parse_grilla(grilla_file, playlist['date'], channel)
-            except Exception as e: lines.append(f'  WARNING: Grilla error: {e}')
+            except Exception as e:
+                lines.append(f'  WARNING: Grilla error: {e}')
         if not xml_rows and not grilla_ids:
             pi = check_promo_repeats(playlist, lang=lang)
             ch_label = CH_LABELS.get(channel, channel.upper())
@@ -219,8 +226,14 @@ if st.button(t('run'), type='primary', use_container_width=True):
             lines.append('')
             return lines, []
         ch_label = CH_LABELS.get(channel, channel.upper())
-        report_text, manual_warns = generate_report(ch_label, playlist, xml_rows, grilla_ids, lang, is_tn=is_tn)
-        lines.append(report_text)
+        try:
+            report_text, manual_warns = generate_report(
+                ch_label, playlist, xml_rows, grilla_ids, lang,
+                is_tn=is_tn, file_info=file_info)
+            lines.append(report_text)
+        except Exception as e:
+            lines.append(f'  ERROR generating report: {e}')
+            manual_warns = []
         return lines, manual_warns
 
     # Build per-day reports
@@ -244,9 +257,31 @@ if st.button(t('run'), type='primary', use_container_width=True):
                 if key not in days: continue
                 info     = days[key]
                 xml_file = info.get('xml')
-                grilla_f = grillas.get(channel)
-                jsons    = sorted(info['json'], key=lambda f: f.name)
+                # grillas stores a list — pick the one whose week matches this date
+                gf_list  = grillas.get(channel, [])
+                if not isinstance(gf_list, list): gf_list = [gf_list] if gf_list else []
+                grilla_warn = None
+                try:
+                    from datetime import datetime as _dt2
+                    from checker import pick_grilla_for_date
+                    td = _dt2.strptime(date_str, '%Y-%m-%d').date()
+                    grilla_f, grilla_warn = pick_grilla_for_date(gf_list, td, channel)
+                except:
+                    grilla_f = gf_list[0] if gf_list else None
+                # Sort: partial (no marker) before full (has marker)
+                def _is_full(jf):
+                    try:
+                        jf.seek(0)
+                        d = json.load(jf)
+                        jf.seek(0)
+                        return any(a.get('type')=='marker'
+                                   for ev in d.get('events',[])[:3]
+                                   for a in ev.get('assets',[]))
+                    except: jf.seek(0); return False
+                jsons = sorted(info['json'], key=lambda f: (1 if _is_full(f) else 0, f.name))
                 ch_lines = []
+                if grilla_warn:
+                    ch_lines.append(f'  ⚠  {grilla_warn}')
                 for jf in jsons:
                     ch_lines.append(f'JSON: {jf.name}')
                     if xml_file:  xml_file.seek(0)
@@ -330,35 +365,29 @@ if st.button(t('run'), type='primary', use_container_width=True):
 
     if all_manual_warns:
         warn_header = '⚠ MANUAL REVIEW NEEDED:' if lang == 'en' else '⚠ REVISIÓN MANUAL REQUERIDA:'
-        # Group by channel label
-        from collections import defaultdict
-        grouped = defaultdict(list)
-        for ch_lbl, d_str, cnt in all_manual_warns:
-            grouped[ch_lbl].append((d_str, cnt))
         warn_lines = [warn_header]
-        for ch_lbl, entries in grouped.items():
-            warn_lines.append(f'{ch_lbl}')
-            for d_str, cnt in entries:
-                warn_lines.append(f'    {d_str}: {cnt} block{"s" if cnt>1 else ""} need{"s" if cnt==1 else ""} manual review')
+        for ch_lbl, d_str, cnt in all_manual_warns:
+            warn_lines.append(f'')
+            warn_lines.append(f'  {ch_lbl}  —  {d_str}')
+            warn_lines.append(f'    {cnt} commercial block{"s" if cnt>1 else ""} need manual review')
         st.error('\n'.join(warn_lines))
 
     # ── Empty report detection
-    empty_reports = []
+    _empty = []
     for _ds in sorted_dates:
         for _ch, _lines in day_reports.get(_ds, {}).get('channels', {}).items():
-            _txt = '\n'.join(_lines)
-            if not any(s in _txt for s in ['SUMMARY', 'PROGRAM CHECK', 'COMMERCIAL CHECK', 'PROMO']):
-                empty_reports.append((CH_DISPLAY.get(_ch, _ch), _ds))
-    if empty_reports:
-        _e = ['ℹ  ' + ('Empty Reports:' if lang=='en' else 'Reportes Vacíos:')]
-        for _cl, _d in empty_reports: _e.append(f'  {_cl} — {_d}')
-        st.warning('\n'.join(_e))
+            if not any(s in '\n'.join(_lines) for s in ['SUMMARY','PROGRAM CHECK','COMMERCIAL CHECK','PROMO']):
+                _empty.append((CH_DISPLAY.get(_ch, _ch), _ds))
+    if _empty:
+        _el = ['ℹ  ' + ('Empty Reports:' if lang=='en' else 'Reportes Vacíos:')]
+        for _cl, _d in _empty: _el.append(f'  {_cl} — {_d}')
+        st.warning('\n'.join(_el))
 
-    # ── Not Ingested only filter (expander, no rerun needed)
+    # ── Not Ingested only (expander — no rerun)
     with st.expander('🔍 Not Ingested only' if lang=='en' else '🔍 Solo No Ingestados'):
-        _ni_lines = [l for l in full_text.splitlines()
-                     if any(s in l for s in ['NOT INGESTED','NO INGESTADO','CHANNEL:','DATE:','CANAL:','FECHA:','═══'])]
-        st.text('\n'.join(_ni_lines) if _ni_lines else ('No not-ingested assets found.' if lang=='en' else 'Sin activos no ingestados.'))
+        _ni = [l for l in full_text.splitlines()
+               if any(s in l for s in ['NOT INGESTED','NO INGESTADO','CHANNEL:','DATE:','CANAL:','FECHA:','═══'])]
+        st.text('\n'.join(_ni) if _ni else ('None found.' if lang=='en' else 'Ninguno encontrado.'))
 
     # Build tab structure: All + per-date (regular + Sony mixed) + dedicated Sony tabs
     CH_DISPLAY2 = {**CH_DISPLAY,
