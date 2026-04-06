@@ -83,25 +83,29 @@ if uploaded:
                          'Type': f'Log {short_date}', 'File': info['xml'].name})
 
     # For grillas, read the week-start Monday date from the file content
-    for ch_key, gf in grillas.items():
+    for ch_key, gf_list in grillas.items():
         ch = CH_DISPLAY.get(ch_key, ch_key.upper())
-        grilla_date_str = '(Week)'
-        try:
-            from openpyxl import load_workbook
-            import io
-            gf.seek(0)
-            wb = load_workbook(io.BytesIO(gf.read()), read_only=True)
-            gf.seek(0)
-            ws = wb.active
-            rows_g = list(ws.iter_rows(max_row=3, values_only=True))
-            if len(rows_g) > 1:
-                monday_val = rows_g[1][2] if len(rows_g[1]) > 2 else None
-                if monday_val and hasattr(monday_val, 'strftime'):
-                    grilla_date_str = monday_val.strftime('%m/%d')
-        except: pass
-        grilla_label = f'{"Grilla" if lang=="es" else "Grid"} {grilla_date_str}'
-        rows.append({'Date': grilla_date_str, 'Channel': ch,
-                     'Type': grilla_label, 'File': gf.name})
+        if not isinstance(gf_list, list):
+            gf_list = [gf_list]
+        for gf in gf_list:
+            grilla_date_str = '(PDF)' if gf.name.lower().endswith('.pdf') else '(Week)'
+            if not gf.name.lower().endswith('.pdf'):
+                try:
+                    from openpyxl import load_workbook
+                    import io
+                    gf.seek(0)
+                    wb = load_workbook(io.BytesIO(gf.read()), read_only=True)
+                    gf.seek(0)
+                    ws = wb.active
+                    rows_g = list(ws.iter_rows(max_row=3, values_only=True))
+                    if len(rows_g) > 1:
+                        monday_val = rows_g[1][2] if len(rows_g[1]) > 2 else None
+                        if monday_val and hasattr(monday_val, 'strftime'):
+                            grilla_date_str = monday_val.strftime('%m/%d')
+                except: pass
+            grilla_label = f'{"Grilla" if lang=="es" else "Grid"} {grilla_date_str}'
+            rows.append({'Date': grilla_date_str, 'Channel': ch,
+                         'Type': grilla_label, 'File': gf.name})
     for uf in unknown_files:
         rows.append({'Date': '?', 'Channel': '?', 'Type': '?', 'File': uf.name})
     # Sony files — use filename only, never pre-read (preserves file state for pairing)
@@ -211,7 +215,16 @@ if st.button(t('run'), type='primary', use_container_width=True):
                 if key not in days: continue
                 info     = days[key]
                 xml_file = info.get('xml')
-                grilla_f = grillas.get(channel)
+                # grillas stores a list — pick the one whose week matches this date
+                gf_list  = grillas.get(channel, [])
+                if not isinstance(gf_list, list): gf_list = [gf_list] if gf_list else []
+                try:
+                    from datetime import datetime as _dt2
+                    from checker import pick_grilla_for_date
+                    td = _dt2.strptime(date_str, '%Y-%m-%d').date()
+                    grilla_f = pick_grilla_for_date(gf_list, td, channel)
+                except:
+                    grilla_f = gf_list[0] if gf_list else None
                 jsons    = sorted(info['json'], key=lambda f: f.name)
                 ch_lines = []
                 for jf in jsons:
