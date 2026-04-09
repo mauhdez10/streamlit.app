@@ -1277,8 +1277,11 @@ def check_bugs(playlist, current_start=None, lang='en'):
             return rounded
         t_start_r = _round_min(t_start)
         t_end_r   = _round_min(t_end)
-        s = fmt_t(t_start_r) if t_start_r else '?'
-        e = fmt_t(t_end_r)   if t_end_r   else ('end of day' if lang=='en' else 'fin del día')
+        def _fmt_hm(dt):
+            et_dt, tz = utc_to_et(dt)
+            return dt.strftime('%H:%M') + ' UTC / ' + et_dt.strftime('%H:%M') + ' ET'
+        s = _fmt_hm(t_start_r) if t_start_r else '?'
+        e = _fmt_hm(t_end_r)   if t_end_r   else ('end of day' if lang=='en' else 'fin del día')
         lines.append(f'  {logo}  :  {s} → {e}')
     return lines
 
@@ -1286,56 +1289,49 @@ def check_bugs(playlist, current_start=None, lang='en'):
 def check_cue_tones(playlist, lang='en'):
     """
     Cue tone report.
-    Sequence: CUE ON clip (ignored) → clip(s) → CUE OFF clip (included).
-    Duration = sum of all clips strictly after CUE ON up to and including CUE OFF.
-    Uses ev_dur stored on each event; clips computed from sorted cue_tones list.
+    CUE ON = trigger (its duration NOT counted).
+    Duration = all clips from immediately after CUE ON through CUE OFF (inclusive).
+    Formula: (t_off_start - t_on_start) + cueoff_dur - cueon_dur
+    Falls back to CUE ON gap (next CUE ON - this CUE ON) if no CUE OFF found.
     """
-    all_cts = sorted(playlist.get('cue_tones', []), key=lambda c: c['start'] or datetime.min)
+    all_cts  = sorted(playlist.get('cue_tones', []), key=lambda c: c['start'] or datetime.min)
     cue_ons  = [c for c in all_cts if not c.get('is_cueoff')]
     cue_offs = [c for c in all_cts if c.get('is_cueoff')]
 
     if not cue_ons:
         return [f"  \u2714  No cue tones found" if lang=='en' else "  \u2714  Sin cue tones"]
 
-    # Also get all promos sorted for duration lookup using gaps
-    all_promos = sorted(playlist.get('promos', []), key=lambda p: p['start'] or datetime.min)
-    promo_gap_dur = {}
-    for i, p in enumerate(all_promos):
-        if p['start']:
-            if i+1 < len(all_promos) and all_promos[i+1]['start']:
-                promo_gap_dur[p['start']] = int((all_promos[i+1]['start'] - p['start']).total_seconds())
-            else:
-                promo_gap_dur[p['start']] = p.get('duration', 30) or 30
-
     from collections import defaultdict
     stats = defaultdict(lambda: {'count': 0, 'first': None, 'last_dur': 0})
     total_dur = 0
 
-    for ct_on in cue_ons:
-        ref   = ct_on['ct_id']
-        t_on  = ct_on['start']
+    for i, ct_on in enumerate(cue_ons):
+        ref    = ct_on['ct_id']
+        t_on   = ct_on['start']
+        on_dur = ct_on.get('duration', 0) or 0
         if not t_on: continue
 
-        # Find the next CUE OFF after this CUE ON
-        t_off = next((c['start'] for c in cue_offs if c['start'] and c['start'] > t_on), None)
+        # Find next CUE OFF strictly after this CUE ON
+        t_off     = None
+        off_dur   = 0
+        for ct_off in cue_offs:
+            if ct_off['start'] and ct_off['start'] > t_on:
+                t_off   = ct_off['start']
+                off_dur = ct_off.get('duration', 0) or 0
+                break
 
         if t_off:
-            # Sum durations of all promos strictly between t_on and t_off (inclusive of t_off promo)
-            block_dur = sum(
-                promo_gap_dur.get(p['start'], p.get('duration', 30) or 30)
-                for p in all_promos
-                if p['start'] and p['start'] > t_on and p['start'] <= t_off
-            )
+            # (t_off_start - t_on_start) + cueoff_dur - cueon_dur
+            gap = int((t_off - t_on).total_seconds())
+            block_dur = gap + off_dur - on_dur
         else:
-            # No CUE OFF found — use next CUE ON as boundary
-            next_on = next((c['start'] for c in cue_ons if c['start'] and c['start'] > t_on), None)
-            block_dur = sum(
-                promo_gap_dur.get(p['start'], p.get('duration', 30) or 30)
-                for p in all_promos
-                if p['start'] and p['start'] > t_on and (next_on is None or p['start'] < next_on)
-            )
+            # No CUE OFF — use gap to next CUE ON as fallback
+            if i + 1 < len(cue_ons) and cue_ons[i+1]['start']:
+                block_dur = int((cue_ons[i+1]['start'] - t_on).total_seconds()) - on_dur
+            else:
+                block_dur = 0
 
-        block_dur = min(block_dur, 240)  # cap at 4 min
+        block_dur = max(0, min(block_dur, 240))  # clamp 0–4min
         total_dur += block_dur
 
         stats[ref]['count'] += 1
