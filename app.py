@@ -10,7 +10,9 @@ from checker import (
     parse_json_playlist, parse_xml_log, parse_xml_log_tn, parse_grilla,
     generate_report, check_promo_repeats, detect_files,
     parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP,
-    parse_sony_json_markers
+    parse_sony_json_markers,
+    load_holatv_log, group_holatv_blocks, parse_grilla_holatv_v2,
+    generate_report_holatv_v2, pick_grilla_for_date,
 )
 
 APP_VERSION = "v30.5"
@@ -97,6 +99,7 @@ if uploaded:
 if uploaded:
     st.markdown(f"**{'Detected files' if lang=='en' else 'Archivos detectados'}: {total_detected} / {total_uploaded} uploaded**")
     CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹',
+                  'hu':'Hola TV US 🤝','hl':'Hola TV Latam 🌍',
                   'us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}
     rows = []
     for (date_str, channel), info in sorted(days.items()):
@@ -175,7 +178,8 @@ available = sorted(set(ch for (_, ch) in days.keys()) | set(grillas.keys()))
 sony_codes_present = sorted(set(sf['code'] for sf in sony_files_raw))
 all_options = available + sony_codes_present
 CH_FORMAT = {'catv':'CATV','tvd':'TVD','latam':'Pasiones Latam',
-             'us':'Pasiones US','tn':'Fast Todonovelas'}
+             'us':'Pasiones US','tn':'Fast Todonovelas',
+             'hu':'Hola TV US 🤝','hl':'Hola TV Latam 🌍'}
 CH_FORMAT.update({code: f'{code} {SONY_EMOJI.get(code,"📺")} {SONY_CHANNEL_MAP.get(code,code)}' for code in sony_codes_present})
 
 if all_options:
@@ -196,7 +200,8 @@ if st.button(t('run'), type='primary', use_container_width=True):
     CH_LABELS = {
         'catv': 'CATV', 'tvd': 'TVD',
         'latam': 'Pasiones Latam', 'us': 'Pasiones US',
-        'tn': 'Fast Todonovelas'
+        'tn': 'Fast Todonovelas',
+        'hu': 'Hola TV US 🤝', 'hl': 'Hola TV Latam 🌍',
     }
 
     def process_one(channel, json_file, xml_file, grilla_file):
@@ -257,12 +262,13 @@ if st.button(t('run'), type='primary', use_container_width=True):
     ]
 
     all_manual_warns = []  # list of (channel_label, date_str, count)
-    CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹','us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}
+    CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹',
+                  'hu':'Hola TV US 🤝','hl':'Hola TV Latam 🌍','us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺'}
     with st.spinner(t('running')):
         for date_str in sorted_dates:
             d_lines = [f'{"DATE" if lang=="en" else "FECHA"}: {date_str}', '─'*60]
             ch_reports = {}  # channel -> lines
-            for channel in ['catv', 'tvd', 'latam', 'us', 'tn']:
+            for channel in ['catv', 'tvd', 'latam', 'us', 'tn', 'hu', 'hl']:
                 if channel not in selected: continue
                 key = (date_str, channel)
                 if key not in days: continue
@@ -295,6 +301,34 @@ if st.button(t('run'), type='primary', use_container_width=True):
                     ch_lines.append(f'  ⚠  {grilla_warn}')
                 for jf in jsons:
                     ch_lines.append(f'JSON: {jf.name}')
+                    # ── HolaTV channels ──────────────────────────────────
+                    if channel in ('hu', 'hl'):
+                        try:
+                            jf.seek(0)
+                            _pl  = parse_json_playlist(json.load(jf))
+                            jf.seek(0)
+                            _lf  = info.get('xml') or info.get('log')
+                            _lr, _dx, _cx = (load_holatv_log(_lf, info['date'])
+                                             if _lf else ([], 0, 0))
+                            _gfl = grillas.get(channel, [])
+                            if not isinstance(_gfl, list): _gfl = [_gfl] if _gfl else []
+                            _gf_raw = pick_grilla_for_date(_gfl, info['date'], channel)
+                            _gf  = _gf_raw[0] if isinstance(_gf_raw, tuple) else _gf_raw
+                            _ge  = (parse_grilla_holatv_v2(_gf, info['date'])
+                                    if _gf and _gf.name.lower().endswith('.pdf') else [])
+                            _cs  = (_pl['programs'][0]['start']
+                                    if _pl['type']=='current' and _pl['programs'] else None)
+                            _fi  = {'json': jf.name,
+                                    'log':  _lf.name if _lf else None,
+                                    'grilla': _gf.name if _gf else None}
+                            ch_lines.append(generate_report_holatv_v2(
+                                CH_LABELS.get(channel, channel.upper()),
+                                _lr, _dx, _cx, _ge, _pl, lang,
+                                file_info=_fi, current_start_utc=_cs))
+                        except Exception as _he:
+                            ch_lines.append(f'  ERROR (HolaTV): {_he}')
+                        continue
+                    # ─────────────────────────────────────────────────────
                     if xml_file:  xml_file.seek(0)
                     if grilla_f:  grilla_f.seek(0)
                     result = process_one(channel, jf, xml_file, grilla_f)
@@ -363,7 +397,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
             sony_by_code[code] += pairing_lines
 
     # ── BUILD FULL REPORT TEXT ────────────────────────────────────────────────
-    st.subheader(t('report'))
+    st.session_state['_report_ready'] = True
     all_lines = header_lines[:]
     for d in sorted_dates:
         all_lines += day_reports.get(d, {}).get('all', [])
@@ -374,7 +408,31 @@ if st.button(t('run'), type='primary', use_container_width=True):
             all_lines += lines
     full_text = '\n'.join(all_lines)
 
+    # Store all report data in session state — survives widget interactions
+    st.session_state['report_full_text']    = full_text
+    st.session_state['report_day_reports']   = day_reports
+    st.session_state['report_sorted_dates']  = sorted_dates
+    st.session_state['report_header_lines']  = header_lines
+    st.session_state['report_sony_date_ch']  = sony_date_ch
+    st.session_state['report_sony_by_code']  = sony_by_code
+    st.session_state['report_all_warns']     = all_manual_warns
+    st.session_state['report_lang']          = lang
+
+
+# ── REPORT RENDER (outside button block — survives reruns) ──────────────────
+if st.session_state.get('_report_ready'):
+    full_text    = st.session_state.get('report_full_text', '')
+    day_reports  = st.session_state.get('report_day_reports', {})
+    sorted_dates = st.session_state.get('report_sorted_dates', [])
+    header_lines = st.session_state.get('report_header_lines', [])
+    sony_date_ch = st.session_state.get('report_sony_date_ch', {})
+    sony_by_code = st.session_state.get('report_sony_by_code', {})
+    lang         = st.session_state.get('report_lang', 'en')
+
+    st.subheader('📄 Report' if lang=='en' else '📄 Reporte')
+
     # ── Manual review warnings
+    all_manual_warns = st.session_state.get('report_all_warns', [])
     if all_manual_warns:
         warn_header = '⚠ MANUAL REVIEW NEEDED:' if lang == 'en' else '⚠ REVISIÓN MANUAL REQUERIDA:'
         warn_lines = [warn_header]
@@ -405,7 +463,8 @@ if st.button(t('run'), type='primary', use_container_width=True):
         # Build per-channel NI text from full report
         _ni_by_ch = {}
         _cur_ch = None
-        for _line in full_text.splitlines():
+        _ft = full_text
+        for _line in _ft.splitlines():
             if _line.startswith('CHANNEL:') or _line.startswith('CANAL:'):
                 _cur_ch = _line
             if 'NOT INGESTED' in _line or 'NO INGESTADO' in _line:
@@ -436,16 +495,16 @@ if st.button(t('run'), type='primary', use_container_width=True):
     # Build tab structure: All + per-date (regular + Sony mixed) + dedicated Sony tabs
     CH_DISPLAY2 = {**CH_DISPLAY,
                    **{code: f'{code} {SONY_EMOJI.get(code,"📺")} {SONY_CHANNEL_MAP.get(code,code)}'
-                      for code in sony_by_code}}
+                      for code in st.session_state.get('report_sony_by_code',{})}}
 
     # Merge Sony channels into date reports for unified date tabs
     all_tab_dates = sorted(set(list(sorted_dates) + list(sony_date_ch.keys())))
 
     def _render_day_tab(date_str, key_prefix):
-        day_data   = day_reports.get(date_str, {})
+        day_data   = st.session_state.get('report_day_reports',"").get(date_str, {})
         ch_reports = dict(day_data.get('channels', {}))
         # Add Sony channels for this date
-        sony_for_date = sony_date_ch.get(date_str, {})
+        sony_for_date = st.session_state.get('report_sony_date_ch',{}).get(date_str, {})
         for code, lines in sorted(sony_for_date.items()):
             ch_reports[code] = lines
         day_text = '\n'.join(header_lines + day_data.get('all', []) +
@@ -478,7 +537,7 @@ if st.button(t('run'), type='primary', use_container_width=True):
         with tabs[0]:
             st.text(full_text)
             dl_lbl = '⬇ Full Report (.txt)' if lang=='en' else '⬇ Reporte Completo (.txt)'
-            st.download_button(dl_lbl, full_text,
+            st.download_button(dl_lbl, st.session_state.get('report_full_text',""),
                                file_name=f'report_all_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                                mime='text/plain', use_container_width=True, key='dl_all')
 
@@ -489,6 +548,6 @@ if st.button(t('run'), type='primary', use_container_width=True):
     else:
         st.text(full_text)
         dl_lbl3 = '⬇ Full Report (.txt)' if lang=='en' else '⬇ Reporte Completo (.txt)'
-        st.download_button(dl_lbl3, full_text,
+        st.download_button(dl_lbl3, st.session_state.get('report_full_text',""),
                            file_name=f'report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt',
                            mime='text/plain', use_container_width=True, key='dl_single_all')
