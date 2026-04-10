@@ -786,105 +786,176 @@ def detect_files(uploaded_files):
     return days, grillas, unknown, sony_files
 
 
+
+def split_sony_json_by_markers(data, json_filename=''):
+    """
+    Split a Sony JSON into segments at each mid-file marker.
+    Returns list of dicts:
+      {events, markers, expected_log_base, date, seg_index, total_segs, is_partial, label}
+    If no mid-file markers: returns single-element list (unchanged behavior).
+    """
+    events  = data.get('events', [])
+    # Find all marker event indices
+    marker_positions = []
+    for i, ev in enumerate(events):
+        for a in ev.get('assets', []):
+            if a.get('type') == 'marker':
+                marker_positions.append(i)
+                break
+
+    def _ev_date(ev_list):
+        """Get date from first event with a parseable startTime."""
+        for ev in ev_list:
+            st = ev.get('startTime', '')[:19]
+            try:
+                return datetime.strptime(st, '%Y-%m-%d %H:%M:%S').date()
+            except Exception:
+                pass
+        return None
+
+    # No mid-file markers OR marker is at position 0 only → single segment
+    if not marker_positions or (len(marker_positions) == 1 and marker_positions[0] < 3):
+        return [{
+            'events':           events,
+            'markers':          parse_sony_json_markers(data),
+            'expected_log_base': None,
+            'date':             _ev_date(events),
+            'seg_index':        1,
+            'total_segs':       1,
+            'is_partial':       marker_positions == [],
+            'label':            '',
+            'data':             data,
+        }]
+
+    # Build split points: [0, marker1_idx, marker2_idx, ...]
+    # First segment is before first marker (partial if no leading marker)
+    splits = []
+    has_leading_marker = marker_positions and marker_positions[0] < 3
+    if has_leading_marker:
+        # Starts with a marker — treat whole thing as full, split at subsequent markers
+        split_idxs = [0] + [p for p in marker_positions if p >= 3]
+    else:
+        # Partial before first marker
+        split_idxs = [0] + marker_positions
+
+    total = len(split_idxs)
+    segments = []
+    for s_i, start_idx in enumerate(split_idxs):
+        end_idx = split_idxs[s_i + 1] if s_i + 1 < len(split_idxs) else len(events)
+        seg_events = events[start_idx:end_idx]
+        is_partial = (s_i == 0 and not has_leading_marker)
+        seg_data   = {**data, 'events': seg_events}
+        seg_markers = parse_sony_json_markers(seg_data)
+        expected_log = seg_markers[0]['log_base'] if seg_markers else None
+        seg_date = _ev_date(seg_events)
+        label = f'[{s_i+1}/{total} — {"Partial" if is_partial else "Full"}]'
+        segments.append({
+            'events':            seg_events,
+            'markers':           seg_markers,
+            'expected_log_base': expected_log,
+            'date':              seg_date,
+            'seg_index':         s_i + 1,
+            'total_segs':        total,
+            'is_partial':        is_partial,
+            'label':             label,
+            'data':              seg_data,
+        })
+    return segments
+
+
 def pair_sony_files(sony_files, lang='en'):
     """
     Pair Sony JSON files with Sony XML log files by channel code + date/marker.
+    Multi-day JSONs (partial + marker, or multiple markers) are split into segments,
+    each paired independently with its own XML log.
     Returns list of pairing dicts for the app to process.
-    Each: {'label', 'code', 'channel_name', 'json_file', 'xml_file', 'xml_filename', 'date'}
-    Plus unmatched XMLs and JSONs.
     """
     json_list = [f for f in sony_files if f['ftype'] == 'json']
     xml_list  = [f for f in sony_files if f['ftype'] == 'xml']
 
-    pairings    = []
-    used_jsons  = set()
+    pairings = []
 
-    # For each JSON: read markers to find expected XML(s)
-    # Also extract date from JSON content for fallback
-    json_info = []
     for jf in json_list:
         try:
             jf['file'].seek(0)
             data = json.load(jf['file'])
             jf['file'].seek(0)
-        except:
+        except Exception:
             data = {'events': []}
-        markers  = parse_sony_json_markers(data)
-        date_val = _date_from_json_content(jf['file'])
-        try: jf['file'].seek(0)
-        except: pass
-        json_info.append({'jf': jf, 'data': data,
-                          'markers': markers, 'date': date_val})
 
-    # Match full JSONs (with markers) first, then partial (date-based) to avoid consuming wrong XML
-    json_info_sorted = sorted(json_info, key=lambda x: 0 if x['markers'] else 1)
-    for jinfo in json_info_sorted:
-        jf       = jinfo['jf']
-        code     = jf['code']
-        ch_name  = SONY_CHANNEL_MAP.get(code, code)
-        matched_xml = None
-        # Use filename date as fallback if content date failed
-        if jinfo['date'] is None:
-            jinfo['date'] = _date_from_xml_filename(jf['file'].name)
+        code    = jf['code']
+        ch_name = SONY_CHANNEL_MAP.get(code, code)
+        segments = split_sony_json_by_markers(data, jf['file'].name)
+        total    = len(segments)
 
-        if jinfo['markers']:
-            for mk in jinfo['markers']:
-                if not mk['log_base']: continue
+        for seg in segments:
+            seg_date = seg['date']
+            is_multi = total > 1
+
+            # Find matching XML for this segment
+            matched_xml = None
+
+            # 1. Try to match by expected log base from marker
+            if seg['expected_log_base']:
                 for xf in xml_list:
                     if xf['code'] != code: continue
                     xbase = extract_sony_xml_base(xf['file'].name)
-                    if xbase.upper() == mk['log_base'].upper():
-                        matched_xml = xf
-                        break
-                if matched_xml: break
+                    if xbase.upper() == seg['expected_log_base'].upper():
+                        matched_xml = xf; break
 
-        # Fallback: match by channel code + date from filename
-        if not matched_xml and jinfo['date']:
-            date_str = jinfo['date'].strftime('%Y%m%d')
-            for xf in xml_list:
-                if xf['code'] != code: continue
-                if date_str in xf['file'].name:
-                    matched_xml = xf
-                    break
+            # 2. Fallback: match by channel code + date from segment
+            if not matched_xml and seg_date:
+                date_str = seg_date.strftime('%Y%m%d')
+                for xf in xml_list:
+                    if xf['code'] != code: continue
+                    if date_str in xf['file'].name:
+                        matched_xml = xf; break
 
-        # Last resort: if only one XML for this channel code, pair it
-        if not matched_xml:
-            available = [xf for xf in xml_list
-                         if xf['code'] == code]
-            if len(available) == 1:
-                matched_xml = available[0]
+            # 3. Last resort: only one XML for this channel
+            # Only use for single-segment JSONs or partial segments.
+            # For full segments in multi-day, wrong-date fallback causes mismatches.
+            if not matched_xml and (total == 1 or seg['is_partial']):
+                available = [xf for xf in xml_list if xf['code'] == code]
+                if len(available) == 1:
+                    matched_xml = available[0]
 
-        used_jsons.add(id(jf))
-        pairings.append({
-            'label':        f'{ch_name} — {jinfo["date"] or "?"}',
-            'code':         code,
-            'channel_name': ch_name,
-            'json_file':    jf['file'],
-            'json_data':    jinfo['data'],
-            'xml_file':     matched_xml['file'] if matched_xml else None,
-            'xml_filename': matched_xml['file'].name if matched_xml else None,
-            'date':         jinfo['date'],
-        })
+            multi_lbl = f' {seg["label"]}' if is_multi else ''
+            pairings.append({
+                'label':         f'{ch_name} — {seg_date or "?"}',
+                'code':          code,
+                'channel_name':  ch_name,
+                'json_file':     jf['file'],
+                'json_data':     seg['data'],
+                'xml_file':      matched_xml['file'] if matched_xml else None,
+                'xml_filename':  matched_xml['file'].name if matched_xml else None,
+                'date':          seg_date,
+                'is_multi_day':  is_multi,
+                'segment_label': multi_lbl,
+                'is_partial':    seg['is_partial'],
+            })
 
-    # Unmatched XMLs (no JSON for them)
-    # Show XMLs with no JSON — find ones not paired to any JSON by code+date
-    paired_xml_ids = {id(p["xml_file"]) for p in pairings if p["xml_file"]}
-    unmatched_xml = [xf for xf in xml_list if id(xf["file"]) not in paired_xml_ids]
-    for xf in unmatched_xml:
+    # Unmatched XMLs
+    paired_xml_ids = {id(p['xml_file']) for p in pairings if p['xml_file']}
+    for xf in xml_list:
+        if id(xf['file']) in paired_xml_ids: continue
         code    = xf['code']
         ch_name = SONY_CHANNEL_MAP.get(code, code)
         pairings.append({
-            'label':        f'{ch_name} — LOG ONLY (no JSON)',
-            'code':         code,
-            'channel_name': ch_name,
-            'json_file':    None,
-            'json_data':    None,
-            'xml_file':     xf['file'],
-            'xml_filename': xf['file'].name,
-            'date':         None,
+            'label':         f'{ch_name} — LOG ONLY (no JSON)',
+            'code':          code,
+            'channel_name':  ch_name,
+            'json_file':     None,
+            'json_data':     None,
+            'xml_file':      xf['file'],
+            'xml_filename':  xf['file'].name,
+            'date':          None,
+            'is_multi_day':  False,
+            'segment_label': '',
+            'is_partial':    False,
         })
 
     return pairings
+
 
 
 # ── CHECKS ────────────────────────────────────────────────────────────────────

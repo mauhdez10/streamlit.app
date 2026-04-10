@@ -10,7 +10,7 @@ from checker import (
     parse_json_playlist, parse_xml_log, parse_xml_log_tn, parse_grilla,
     generate_report, check_promo_repeats, detect_files,
     parse_sony_xml_log, check_sony, pair_sony_files, SONY_CHANNEL_MAP,
-    parse_sony_json_markers,
+    parse_sony_json_markers, split_sony_json_by_markers,
     load_holatv_log, group_holatv_blocks, parse_grilla_holatv_v2,
     generate_report_holatv_v2, pick_grilla_for_date,
 )
@@ -85,6 +85,8 @@ with clr_col:
     st.write("")
     if st.button("🗑 Clear files", use_container_width=True):
         st.session_state.uploader_key += 1
+        st.session_state.pop('_report_ready', None)
+        st.session_state.pop('report_full_text', None)
         st.rerun()
 result = detect_files(uploaded) if uploaded else ({}, {}, [], [])
 days, grillas, unknown_files, sony_files_raw = result
@@ -152,14 +154,31 @@ if uploaded:
         ch_name = SONY_CHANNEL_MAP.get(sf['code'], sf['code'])
         ch_display = f'{sf["code"]} {SONY_EMOJI.get(sf["code"],"📺")} {ch_name}'
         from checker import _date_from_xml_filename as _dxml
-        # Both JSON and XML Sony filenames contain YYYYMMDD
         d = _dxml(sf['file'].name)
         if sf['ftype'] == 'xml':
             type_label = f'Log {d.strftime("%m/%d") if d else "?"}'
+            rows.append({'Date': str(d) if d else '?', 'Channel': ch_display,
+                         'Type': type_label, 'File': sf['file'].name})
         else:
-            type_label = f'Playlist {d.strftime("%m/%d") if d else "?"}'
-        rows.append({'Date': str(d) if d else '?', 'Channel': ch_display,
-                     'Type': type_label, 'File': sf['file'].name})
+            # Check for multi-day JSON by scanning for mid-file markers
+            try:
+                sf['file'].seek(0)
+                _jdata = json.load(sf['file'])
+                sf['file'].seek(0)
+                _segs = split_sony_json_by_markers(_jdata, sf['file'].name)
+            except Exception:
+                _segs = []
+                sf['file'].seek(0) if hasattr(sf['file'],'seek') else None
+            if len(_segs) > 1:
+                for _seg in _segs:
+                    _sd = _seg['date']
+                    _lbl = f'Multi-Day {_seg["label"]}'
+                    rows.append({'Date': str(_sd) if _sd else '?', 'Channel': ch_display,
+                                 'Type': _lbl, 'File': sf['file'].name})
+            else:
+                type_label = f'Playlist {d.strftime("%m/%d") if d else "?"}'
+                rows.append({'Date': str(d) if d else '?', 'Channel': ch_display,
+                             'Type': type_label, 'File': sf['file'].name})
     if rows:
         import pandas as pd
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
@@ -366,11 +385,14 @@ if st.button(t('run'), type='primary', use_container_width=True):
             elif markers_in_json:           pl_type = SL('pl_full', lang)
             else:                           pl_type = SL('pl_partial', lang)
 
+            seg_lbl = pair.get('segment_label', '')
+            multi_tag = ' [MULTI-DAY]' if pair.get('is_multi_day') else ''
+            json_name = (pair['json_file'].name if pair['json_file'] else '— not provided —') + seg_lbl
             pairing_lines  = [sep60,
                               f'CHANNEL: {code} — {pair["channel_name"]}',
-                              f'DATE: {date_str}',
+                              f'DATE: {date_str}{multi_tag}',
                               f'PLAYLIST TYPE: {pl_type}',
-                              f'JSON: {pair["json_file"].name if pair["json_file"] else "— not provided —"}',
+                              f'JSON: {json_name}',
                               f'LOG:  {pair["xml_filename"] or "— not provided —"}',
                               sep60]
 
