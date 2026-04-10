@@ -59,6 +59,11 @@ L = {
 }
 def t(k): return L[k][lang]
 
+# ── GLOBAL DISPLAY MAPS (needed in render block outside button) ─────────
+CH_DISPLAY = {'catv':'CATV 🌎','tvd':'TVD 📺','latam':'Pasiones Latam 🌹',
+              'us':'Pasiones US ⭐','tn':'Fast Todonovelas 📺',
+              'hu':'Hola TV US 🤝','hl':'Hola TV Latam 🌍'}
+
 col_title, col_copy = st.columns([3, 1])
 with col_title:
     st.title(t('title'))
